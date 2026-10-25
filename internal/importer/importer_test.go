@@ -247,6 +247,27 @@ func TestImportRoundTripsCommandFP(t *testing.T) {
 	}
 }
 
+// delivered_size round-trips through export → import (upstream #319).
+func TestImportRoundTripsDeliveredSize(t *testing.T) {
+	src, _ := db.Open(":memory:")
+	defer src.Close()
+	delivered := int64(140)
+	db.StoreOutput(src, db.StoreInput{ProjectKey: srcProject, SessionID: "s", ToolName: "Bash",
+		Summary: "d", FullContent: "body", OriginalSize: 100, DeliveredSize: &delivered})
+	var rows []importRow
+	if err := json.Unmarshal([]byte(tools.Export(src, srcProject)), &rows); err != nil {
+		t.Fatalf("export is not importable JSON: %v", err)
+	}
+	dbPath := filepath.Join(t.TempDir(), "t.db")
+	if res := importItems(dbPath, rows, false, "k"); res.imported != 1 {
+		t.Fatalf("imported = %d", res.imported)
+	}
+	got := query(t, dbPath, "SELECT delivered_size FROM stored_outputs WHERE tool_name = 'Bash'")
+	if len(got) != 1 || got[0][0] != int64(140) {
+		t.Errorf("delivered_size after import = %v", got)
+	}
+}
+
 // ── secret scan (upstream #273) ─────────────────────────────────────────────
 
 const (

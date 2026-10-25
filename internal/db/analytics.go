@@ -21,6 +21,11 @@ func startOfDayUnix(date string) int64 {
 	return t.UTC().Unix()
 }
 
+// deliveredExpr is the bytes Claude received for a row: its delivered size
+// (header included, upstream #319), or for rows written before that was
+// recorded, the summary alone. The *SummaryBytes savings figures sum this.
+const deliveredExpr = "COALESCE(delivered_size, summary_size)"
+
 // GetStats returns aggregate storage stats for a project. The savings figures
 // (Total*, CompressionRatio) cover intercepted tool output only — recall__note
 // memory is excluded and reported separately as Note*, so a bulk note backend
@@ -33,7 +38,7 @@ func GetStats(database *sql.DB, projectKey string) Stats {
 		SELECT
 			COALESCE(SUM(CASE WHEN tool_name != 'recall__note' THEN 1 ELSE 0 END), 0),
 			COALESCE(SUM(CASE WHEN tool_name != 'recall__note' THEN original_size ELSE 0 END), 0),
-			COALESCE(SUM(CASE WHEN tool_name != 'recall__note' THEN summary_size ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN tool_name != 'recall__note' THEN `+deliveredExpr+` ELSE 0 END), 0),
 			COALESCE(SUM(pinned), 0),
 			COALESCE(SUM(CASE WHEN pinned = 1 THEN `+EffectiveSizeExpr+` ELSE 0 END), 0),
 			COALESCE(SUM(CASE WHEN tool_name = 'recall__note' THEN 1 ELSE 0 END), 0),
@@ -58,7 +63,7 @@ func GetBashCommandBreakdown(database *sql.DB, projectKey string) []CommandBreak
 			COALESCE(command_fp, 'unknown'),
 			COUNT(*),
 			COALESCE(SUM(original_size),0),
-			COALESCE(SUM(summary_size),0)
+			COALESCE(SUM(`+deliveredExpr+`),0)
 		FROM stored_outputs
 		WHERE project_key = ? AND tool_name = 'Bash'
 		GROUP BY COALESCE(command_fp, 'unknown')
@@ -85,7 +90,7 @@ func GetToolBreakdown(database *sql.DB, projectKey string) []ToolBreakdownRow {
 			tool_name,
 			COUNT(*),
 			COALESCE(SUM(original_size),0),
-			COALESCE(SUM(summary_size),0)
+			COALESCE(SUM(`+deliveredExpr+`),0)
 		FROM stored_outputs
 		WHERE project_key = ?
 		GROUP BY tool_name
@@ -193,7 +198,7 @@ func GetSessionSummary(database *sql.DB, projectKey string, opts SessionSummaryO
 		SELECT
 			COUNT(*),
 			COALESCE(SUM(original_size), 0),
-			COALESCE(SUM(summary_size), 0),
+			COALESCE(SUM(`+deliveredExpr+`), 0),
 			COUNT(CASE WHEN access_count > 0 THEN 1 END),
 			COALESCE(SUM(access_count), 0)
 		FROM stored_outputs `+base, bp...).Scan(

@@ -69,7 +69,7 @@ func TestStoreOutputSummaryOnly(t *testing.T) {
 	if *s.OutputHash != HashContent(in.FullContent) {
 		t.Error("output_hash should hash the real content")
 	}
-	hit, _ := CheckOutputDedup(database, "proj", HashContent(in.FullContent))
+	hit, _ := CheckOutputDedup(database, "proj", HashContent(in.FullContent), in.ToolName, in.CommandFP)
 	if hit == nil {
 		t.Error("summary-only row should still be dedup-matchable")
 	}

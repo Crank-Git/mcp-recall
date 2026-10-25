@@ -27,8 +27,9 @@ type Store struct {
 	EvictionHalfLifeDays       int
 	GCReminderMB               float64
 	// Retention decides which intercepted outputs keep a retrievable full body:
-	// "full" keeps every body; "balanced" keeps MCP/web/API results and network
-	// Bash and drops reproducible Bash (git/tests/ls/grep/cat…); "minimal" drops
+	// "full" keeps every body; "balanced" keeps MCP/web/API results, network
+	// Bash and content reads (cat, git diff/show/log -p, head/tail, sed -n), and
+	// drops other reproducible Bash (git log/tests/ls/grep…); "minimal" drops
 	// all intercepted bodies. Notes always keep their body regardless.
 	Retention string
 }

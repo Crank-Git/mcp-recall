@@ -44,6 +44,16 @@ func atoi(s string) int {
 // testRunnerHandler summarises pytest/jest/bun test/vitest/go test output into
 // pass/fail counts plus failure names.
 func testRunnerHandler(toolName string, output any) Result {
+	if r, ok := summarizeTestRun(output); ok {
+		return r
+	}
+	return shellHandler(toolName, output)
+}
+
+// summarizeTestRun summarises test-runner output; ok is false when it holds no
+// test result (no count line and no failing test). Also used for make/just
+// recipes (upstream #325).
+func summarizeTestRun(output any) (Result, bool) {
 	stdout := extractStdout(output)
 	stderr := extractStderr(output)
 	combined := strings.TrimSpace(stdout + "\n" + stderr)
@@ -53,8 +63,11 @@ func testRunnerHandler(toolName string, output any) Result {
 	// #308): a name alone does not tell Claude what to fix. Message lines alone
 	// never decide the status: a passing run can print `error: …` from the
 	// code under test.
-	var failureLines []string
+	var failureLines []failureLine
 	failureNames, passLines, failLines := 0, 0, 0
+	// Detail lines still to take after a bun `error:` or a jest `●` line
+	// (upstream #320).
+	detailBudget := 0
 	for _, line := range strings.Split(combined, "\n") {
 		t := strings.TrimSpace(line)
 		if t == "" {
@@ -68,11 +81,22 @@ func testRunnerHandler(toolName string, output any) Result {
 		}
 		isName := failLineRe1.MatchString(t) || failLineRe2.MatchString(t) || failLineRe3.MatchString(t) || failLineRe4.MatchString(t)
 		isMessage := bunErrorRe.MatchString(t) || pytestErrRe.MatchString(line)
-		if isName {
+		switch {
+		case isName:
 			failureNames++
-		}
-		if isName || isMessage {
-			failureLines = append(failureLines, firstChars(t, 120))
+			failureLines = append(failureLines, failureLine{text: clipName(t), isName: true})
+			detailBudget = 0
+			if strings.HasPrefix(t, "●") {
+				detailBudget = maxDetailLines
+			}
+		case isMessage:
+			failureLines = append(failureLines, failureLine{text: firstChars(t, maxTestLine)})
+			if bunErrorRe.MatchString(t) {
+				detailBudget = maxDetailLines
+			}
+		case detailBudget > 0 && isDetail(t):
+			failureLines = append(failureLines, failureLine{text: firstChars(t, maxTestLine)})
+			detailBudget--
 		}
 	}
 
@@ -128,7 +152,7 @@ func testRunnerHandler(toolName string, output any) Result {
 	}
 
 	if !foundSummary && failureNames == 0 {
-		return shellHandler(toolName, output)
+		return Result{}, false
 	}
 
 	// Without count lines (output cut by `tail`, or grepped), count bun's
@@ -173,17 +197,90 @@ func testRunnerHandler(toolName string, output any) Result {
 	}
 	lines := []string{fmt.Sprintf("test runner — %s: %s%s", status, summaryStr, totalStr)}
 	if isFail && len(failureLines) > 0 {
+		kept := selectFailureLines(failureLines, maxBuildErrors)
 		lines = append(lines, "  failures:")
-		n := len(failureLines)
-		if n > maxBuildErrors {
-			n = maxBuildErrors
+		for _, l := range kept {
+			lines = append(lines, "    "+l.text)
 		}
-		for _, l := range failureLines[:n] {
-			lines = append(lines, "    "+l)
-		}
-		if len(failureLines) > maxBuildErrors {
-			lines = append(lines, fmt.Sprintf("    … (+%d more)", len(failureLines)-maxBuildErrors))
+		if len(failureLines) > len(kept) {
+			lines = append(lines, fmt.Sprintf("    … (+%d more)", len(failureLines)-len(kept)))
 		}
 	}
-	return Result{Summary: strings.Join(lines, "\n"), OriginalSize: originalSize}
+	return Result{Summary: strings.Join(lines, "\n"), OriginalSize: originalSize}, true
+}
+
+type failureLine struct {
+	text   string
+	isName bool
+}
+
+// Detail lines kept after one bun `error:` or jest `●` line (upstream #320).
+const (
+	maxDetailLines = 4
+	maxTestLine    = 160
+	nameHead       = 60
+)
+
+var (
+	diffLegendRe = regexp.MustCompile(`^[-+]\s+(Expected|Received)\s+[-+]\s*\d+$`)
+	expRecvRe    = regexp.MustCompile(`^(Expected|Received)\b`)
+	diffLineRe   = regexp.MustCompile(`^[-+]\s`)
+	testTimingRe = regexp.MustCompile(`\s+\[\d+(?:\.\d+)?m?s\]$`)
+)
+
+// isDetail reports Expected/Received values and `-`/`+` diff lines; not the
+// `- Expected  - 1` diff legend.
+func isDetail(t string) bool {
+	if diffLegendRe.MatchString(t) {
+		return false
+	}
+	return expRecvRe.MatchString(t) || diffLineRe.MatchString(t)
+}
+
+// clipName shortens a failing test's name. bun names are `describe > it`, so
+// parameterised cases differ at the end: drop the timing, then clip from the
+// middle so the end survives (upstream #320).
+func clipName(t string) string {
+	name := []rune(testTimingRe.ReplaceAllString(t, ""))
+	if len(name) <= maxTestLine {
+		return string(name)
+	}
+	return string(name[:nameHead]) + " … " + string(name[len(name)-(maxTestLine-nameHead-3):])
+}
+
+// selectFailureLines keeps up to max lines in their original order. Every
+// failure name comes first in priority, so detail never pushes a later
+// failure out of the list; the room left goes to the earliest failures'
+// messages.
+func selectFailureLines(entries []failureLine, max int) []failureLine {
+	if len(entries) <= max {
+		return entries
+	}
+	names := 0
+	for _, e := range entries {
+		if e.isName {
+			names++
+		}
+	}
+	detailRoom := max - names
+	if detailRoom < 0 {
+		detailRoom = 0
+	}
+	nameRoom := max
+	var out []failureLine
+	for _, e := range entries {
+		if e.isName {
+			if nameRoom > 0 {
+				out = append(out, e)
+			}
+			nameRoom--
+			continue
+		}
+		if detailRoom > 0 && nameRoom > 0 {
+			detailRoom--
+			nameRoom--
+			out = append(out, e)
+		}
+	}
+	return out
 }

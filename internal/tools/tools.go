@@ -404,6 +404,11 @@ func storedToObj(s db.StoredOutput) *jsonx.Obj {
 	} else {
 		o.Set("command_fp", nil)
 	}
+	if s.DeliveredSize != nil {
+		o.Set("delivered_size", float64(*s.DeliveredSize))
+	} else {
+		o.Set("delivered_size", nil)
+	}
 	return o
 }
 

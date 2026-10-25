@@ -6,6 +6,7 @@ package handlers
 import (
 	"fmt"
 	"math"
+	"reflect"
 	"regexp"
 	"strings"
 )
@@ -189,6 +190,34 @@ func buildToolHandler(toolName string, output any) Result {
 		if compilerErrRe.MatchString(t) || errorBracket.MatchString(t) || caretOnlyRe.MatchString(t) {
 			errorLines = append(errorLines, firstChars(t, 120))
 		}
+	}
+
+	// A recipe that runs tests (`just test`, `make check`) is summarised as a
+	// test run, since the recipe error alone names no failing test (upstream
+	// #325). Errors the test summary does not already show stay below it: a
+	// later step can fail after the tests pass.
+	if tests, ok := summarizeTestRun(output); ok {
+		var extra []string
+		for _, e := range errorLines {
+			if !strings.Contains(tests.Summary, e) {
+				extra = append(extra, e)
+			}
+		}
+		if len(extra) == 0 {
+			return tests
+		}
+		lines := []string{tests.Summary, fmt.Sprintf("  build errors (%d):", len(extra))}
+		n := len(extra)
+		if n > maxBuildErrors {
+			n = maxBuildErrors
+		}
+		for _, e := range extra[:n] {
+			lines = append(lines, "    "+e)
+		}
+		if len(extra) > maxBuildErrors {
+			lines = append(lines, fmt.Sprintf("    … (+%d more)", len(extra)-maxBuildErrors))
+		}
+		return Result{Summary: strings.Join(lines, "\n"), OriginalSize: originalSize}
 	}
 
 	if len(errorLines) == 0 && len(targetLines) == 0 {
@@ -491,6 +520,75 @@ func CommandFingerprint(command string) string {
 	return verb + " " + second[1]
 }
 
+// ReadPassthroughMaxBytes is the size up to which a content read's output is
+// delivered whole (upstream #327, #332).
+const ReadPassthroughMaxBytes = 8 * 1024
+
+// commandSplitRe splits a command on pipes and sequence operators.
+var commandSplitRe = regexp.MustCompile(`\||;|&&|\n`)
+
+// commandSegments returns the commands in command, each without its
+// cd/wrapper prefixes. The split ignores quoting, so a quoted `| head` can read
+// as a command of its own; ReadPassthroughMaxBytes caps what such a miss
+// delivers.
+func commandSegments(command string) []string {
+	parts := commandSplitRe.Split(command, -1)
+	for i, p := range parts {
+		parts[i] = NormalizeCommand(p)
+	}
+	return parts
+}
+
+// sedLine is a sed line address: a number, a shell expansion the shell turns
+// into one (`$n`, `${n}`, `$((n+40))`), or a bare `$` for the last line. A
+// command substitution `$(…)` is not matched: commandSegments splits on its
+// pipes.
+const sedLine = `(?:\d+|\$(?:\w+|\{\w+\}|\(\([^()]*\)\))|\$)`
+
+var (
+	// sedLineRangeRe matches `sed -n` printing one line or a line range (`N,M`,
+	// `N,$`, `N,+M`).
+	sedLineRangeRe = regexp.MustCompile(`^sed\s+(?:-\S+\s+)*-n\s+['"]?` + sedLine + `(?:,\s*\+?` + sedLine + `)?p['"]?(\s|$)`)
+	headTailRe     = regexp.MustCompile(`^(head|tail)(\s|$)`)
+	grepCmdRe      = regexp.MustCompile(`^(grep|egrep|fgrep|rg|ag|git\s+grep)\s`)
+	grepLimitRe    = regexp.MustCompile(`\s(-[a-zA-Z]*[ABCm]\s*\d+|--(?:after-|before-)?context[=\s]\d+|--max-count[=\s]\d+)`)
+	catDiffShowRe  = regexp.MustCompile(`^(cat|git\s+(diff|show))(\s|$)`)
+	logPatchRe     = regexp.MustCompile(`^git\s+(log|stash\s+show)(\s.*)?\s(-p|--patch|-u)(\s|$)`)
+)
+
+// IsBoundedRead reports whether any command in command limits its own output:
+// head/tail, a `sed -n` line range, or grep context and match limits (-A/-B/-C
+// N, -m N). That output is what Claude asked for, so a summary would drop
+// requested lines (upstream #327).
+func IsBoundedRead(command string) bool {
+	for _, s := range commandSegments(command) {
+		if headTailRe.MatchString(s) || sedLineRangeRe.MatchString(s) {
+			return true
+		}
+		if grepCmdRe.MatchString(s) && grepLimitRe.MatchString(s) {
+			return true
+		}
+	}
+	return false
+}
+
+// IsContentRead reports whether command reads content for Claude: a bounded
+// read, `cat`, `git diff`/`git show`, or a patch from `git log -p`/`git stash
+// show -p`. Their summaries keep stats or a head and tail, which drops what
+// Claude asked for, so the hook delivers small ones whole and balanced
+// retention keeps the body of large ones (upstream #332).
+func IsContentRead(command string) bool {
+	if IsBoundedRead(command) {
+		return true
+	}
+	for _, s := range commandSegments(command) {
+		if catDiffShowRe.MatchString(s) || logPatchRe.MatchString(s) {
+			return true
+		}
+	}
+	return false
+}
+
 // IsCompoundCommand reports whether command runs more than one command in
 // sequence: a `;`, `&&`, `||` or newline outside quotes, escapes and `( … )` /
 // `$( … )`, with a command after it. A pipe is not a separator: it yields one
@@ -614,4 +712,34 @@ func GetBashHandler(input any) Handler {
 		return findHandler
 	}
 	return shellHandler
+}
+
+// readsStderr holds the handlers that read stderr themselves. Test runners,
+// compilers and make report there (`bun test` prints its results on stderr),
+// so empty stdout is normal. Handlers are funcs, which Go cannot compare, so
+// the set is keyed by code pointer.
+var readsStderr = map[uintptr]bool{}
+
+func init() {
+	for _, h := range []Handler{
+		shellHandler, compoundHandler, testRunnerHandler, buildToolHandler,
+		compilerDiagnosticsHandler, packageInstallHandler,
+	} {
+		readsStderr[reflect.ValueOf(h).Pointer()] = true
+	}
+}
+
+// keepStderrError returns the shell handler in place of handler when the
+// command's stdout is empty and its stderr is not: it failed, though inside a
+// pipeline it still exits 0. A handler that summarises stdout would report
+// that as "no matches" or "no changes", while the shell handler keeps stderr
+// (upstream #326). New handlers get this by default.
+func keepStderrError(handler Handler, output any) Handler {
+	if readsStderr[reflect.ValueOf(handler).Pointer()] {
+		return handler
+	}
+	if strings.TrimSpace(extractStdout(output)) == "" && strings.TrimSpace(extractStderr(output)) != "" {
+		return shellHandler
+	}
+	return handler
 }

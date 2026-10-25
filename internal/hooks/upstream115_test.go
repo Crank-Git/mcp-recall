@@ -205,7 +205,7 @@ func TestPostBashSecretsAtLineStart(t *testing.T) {
 				b, _ := json.Marshal(resp)
 				resp = string(b)
 			}
-			return HandlePostToolUse(ptuResponse("Bash", resp, "cat deploy.log"))
+			return HandlePostToolUse(ptuResponse("Bash", resp, "./scripts/deploy.sh"))
 		}
 		t.Run(fmt.Sprintf("control/string=%v", asString), func(t *testing.T) {
 			currentCWD, _ = hookEnv(t)

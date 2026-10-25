@@ -60,29 +60,6 @@ func TestStoreRetrieveSearchSnippet(t *testing.T) {
 	}
 }
 
-func TestDedup(t *testing.T) {
-	database, _ := Open(":memory:")
-	defer database.Close()
-
-	in := mkInput("proj", "mcp__x__list", "content")
-	in.InputHash = ptr("hash123")
-	stored, _ := StoreOutput(database, in)
-
-	got, err := CheckDedup(database, "proj", "hash123")
-	if err != nil || got == nil || got.ID != stored.ID {
-		t.Fatalf("dedup hit expected: %v %v", err, got)
-	}
-	miss, _ := CheckDedup(database, "proj", "nope")
-	if miss != nil {
-		t.Fatalf("dedup miss expected")
-	}
-	// wrong project → miss
-	other, _ := CheckDedup(database, "other", "hash123")
-	if other != nil {
-		t.Fatalf("dedup cross-project leak")
-	}
-}
-
 func TestEvictLFU(t *testing.T) {
 	database, _ := Open(":memory:")
 	defer database.Close()

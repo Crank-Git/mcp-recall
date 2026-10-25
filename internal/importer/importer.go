@@ -51,6 +51,9 @@ type importRow struct {
 	// CommandFP is optional for dumps predating per-command attribution
 	// (upstream #251): missing → NULL, reported as "unknown".
 	CommandFP *string `json:"command_fp"`
+	// DeliveredSize is optional for dumps predating upstream #319: missing →
+	// NULL, and savings figures fall back to summary_size for that row.
+	DeliveredSize *int64 `json:"delivered_size"`
 }
 
 func (r importRow) validate(i int) []string {
@@ -72,6 +75,9 @@ func (r importRow) validate(i int) []string {
 	}
 	if r.Pinned < 0 || r.Pinned > 1 {
 		issues = append(issues, fmt.Sprintf("[%d.pinned] must be 0 or 1", i))
+	}
+	if r.DeliveredSize != nil && *r.DeliveredSize < 0 {
+		issues = append(issues, fmt.Sprintf("[%d.delivered_size] must be non-negative", i))
 	}
 	if r.FullRetained != nil && (*r.FullRetained < 0 || *r.FullRetained > 1) {
 		issues = append(issues, fmt.Sprintf("[%d.full_retained] must be 0 or 1", i))
@@ -99,7 +105,7 @@ func (r importRow) toStored(projectKey string) db.StoredOutput {
 		Summary: r.Summary, FullContent: fullContent, OriginalSize: r.OriginalSize,
 		SummarySize: r.SummarySize, CreatedAt: r.CreatedAt, Pinned: r.Pinned,
 		AccessCount: r.AccessCount, LastAccessed: r.LastAccessed, InputHash: r.InputHash,
-		FullRetained: fullRetained, CommandFP: r.CommandFP,
+		FullRetained: fullRetained, CommandFP: r.CommandFP, DeliveredSize: r.DeliveredSize,
 	}
 }
 

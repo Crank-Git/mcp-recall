@@ -25,6 +25,9 @@ type StoredOutput struct {
 	// CommandFP is the privacy-safe command family fingerprint (Bash rows only;
 	// nil otherwise or pre-migration). See upstream #251.
 	CommandFP *string
+	// DeliveredSize is the bytes Claude received: header, newline, summary
+	// (upstream #319). nil for notes and pre-migration rows.
+	DeliveredSize *int64
 }
 
 // StoreInput is the input required to persist a new compressed tool output.
@@ -47,6 +50,9 @@ type StoreInput struct {
 	// CommandFP is the privacy-safe command family fingerprint (Bash only); nil
 	// stores NULL.
 	CommandFP *string
+	// DeliveredSize is the bytes Claude received for this output (upstream
+	// #319); nil stores NULL.
+	DeliveredSize *int64
 }
 
 // SearchOptions configures full-text search across stored outputs.

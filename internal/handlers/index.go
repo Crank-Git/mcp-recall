@@ -78,7 +78,8 @@ var handlerRegistry = []handlerMatcher{
 }
 
 // GetHandler returns the compression handler for a tool. Dispatch order:
-//  1. native Bash tool → CLI-aware bash handler
+//  1. native Bash tool → CLI-aware bash handler (an error only on stderr goes
+//     to shell, upstream #326)
 //  2. user/community profiles
 //  3. typed-handler registry (first match wins)
 //  4. bundled profiles
@@ -88,7 +89,7 @@ var handlerRegistry = []handlerMatcher{
 //  8. generic handler
 func GetHandler(toolName string, output any, input any) Handler {
 	if toolName == "Bash" {
-		return GetBashHandler(input)
+		return keepStderrError(GetBashHandler(input), output)
 	}
 	if h := profileHandler(toolName, []string{"user", "community"}); h != nil {
 		return h

@@ -514,46 +514,6 @@ func TestPinOutputGranular(t *testing.T) {
 }
 
 // -------------------------------------------------------------------------
-// checkDedup
-// -------------------------------------------------------------------------
-
-func TestCheckDedupGranular(t *testing.T) {
-	t.Run("null when no match", func(t *testing.T) {
-		database := newDB(t)
-		if hit, _ := CheckDedup(database, projKey, "abc123"); hit != nil {
-			t.Error("should be nil")
-		}
-	})
-	t.Run("hit when hash matches", func(t *testing.T) {
-		database := newDB(t)
-		mustStore(t, database, input(func(in *StoreInput) { in.InputHash = sp("hash1234") }))
-		hit, _ := CheckDedup(database, projKey, "hash1234")
-		if hit == nil || hit.InputHash == nil || *hit.InputHash != "hash1234" {
-			t.Fatalf("hit: %+v", hit)
-		}
-	})
-	t.Run("most recent when multiple", func(t *testing.T) {
-		database := newDB(t)
-		now := time.Now().Unix()
-		database.Exec(`INSERT INTO stored_outputs (id,project_key,session_id,tool_name,summary,full_content,original_size,summary_size,created_at,input_hash) VALUES ('recall_dedup0001',?,?,?,?,?,100,3,?,?)`,
-			projKey, "2026-03-01", "mcp__tool", "old", "content", now-10, "hash1234")
-		database.Exec(`INSERT INTO stored_outputs (id,project_key,session_id,tool_name,summary,full_content,original_size,summary_size,created_at,input_hash) VALUES ('recall_dedup0002',?,?,?,?,?,100,3,?,?)`,
-			projKey, "2026-03-01", "mcp__tool", "new", "content", now, "hash1234")
-		hit, _ := CheckDedup(database, projKey, "hash1234")
-		if hit == nil || hit.Summary != "new" {
-			t.Fatalf("most recent: %+v", hit)
-		}
-	})
-	t.Run("cross-project isolation", func(t *testing.T) {
-		database := newDB(t)
-		mustStore(t, database, input(func(in *StoreInput) { in.ProjectKey = "otherproject567"; in.InputHash = sp("hash1234") }))
-		if hit, _ := CheckDedup(database, projKey, "hash1234"); hit != nil {
-			t.Error("should not cross projects")
-		}
-	})
-}
-
-// -------------------------------------------------------------------------
 // schema migrations
 // -------------------------------------------------------------------------
 
@@ -596,26 +556,57 @@ func TestContentHashDedup(t *testing.T) {
 			t.Fatalf("output_hash: %v", stored.OutputHash)
 		}
 	})
-	t.Run("finds identical content across calls", func(t *testing.T) {
+	t.Run("finds identical content from the same tool and command family", func(t *testing.T) {
 		database := newDB(t)
-		a := mustStore(t, database, input(func(in *StoreInput) { in.ToolName = "mcp__x__alpha"; in.FullContent = "same body text" }))
-		mustStore(t, database, input(func(in *StoreInput) { in.ToolName = "mcp__y__beta"; in.FullContent = "unrelated body" }))
-		found, _ := CheckOutputDedup(database, projKey, HashContent("same body text"))
+		fp := "git diff"
+		a := mustStore(t, database, input(func(in *StoreInput) { in.ToolName = "Bash"; in.CommandFP = &fp; in.FullContent = "same body text" }))
+		mustStore(t, database, input(func(in *StoreInput) { in.ToolName = "Bash"; in.CommandFP = &fp; in.FullContent = "unrelated body" }))
+		found, _ := CheckOutputDedup(database, projKey, HashContent("same body text"), "Bash", &fp)
 		if found == nil || found.ID != a.ID {
 			t.Fatalf("found: %+v", found)
+		}
+	})
+	t.Run("returns the most recent match when several exist", func(t *testing.T) {
+		database := newDB(t)
+		now := time.Now().Unix()
+		for _, r := range []struct {
+			id, summary string
+			at          int64
+		}{{"recall_dedup0001", "old", now - 10}, {"recall_dedup0002", "new", now}} {
+			if _, err := database.Exec(`INSERT INTO stored_outputs (id,project_key,session_id,tool_name,summary,full_content,original_size,summary_size,created_at,output_hash)
+				VALUES (?,?,?,?,?,?,100,3,?,?)`, r.id, projKey, "2026-03-01", "mcp__tool", r.summary, "content", r.at, HashContent("content")); err != nil {
+				t.Fatal(err)
+			}
+		}
+		found, _ := CheckOutputDedup(database, projKey, HashContent("content"), "mcp__tool", nil)
+		if found == nil || found.Summary != "new" {
+			t.Fatalf("found: %+v", found)
+		}
+	})
+	t.Run("no match from another tool or command family (#324)", func(t *testing.T) {
+		database := newDB(t)
+		fp := "git diff"
+		mustStore(t, database, input(func(in *StoreInput) { in.ToolName = "mcp__x__alpha"; in.FullContent = "same body text" }))
+		mustStore(t, database, input(func(in *StoreInput) { in.ToolName = "Bash"; in.CommandFP = &fp; in.FullContent = "shared stderr" }))
+		if found, _ := CheckOutputDedup(database, projKey, HashContent("same body text"), "mcp__y__beta", nil); found != nil {
+			t.Error("matched another tool")
+		}
+		other := "git log"
+		if found, _ := CheckOutputDedup(database, projKey, HashContent("shared stderr"), "Bash", &other); found != nil {
+			t.Error("matched another command family")
 		}
 	})
 	t.Run("null when no content matches", func(t *testing.T) {
 		database := newDB(t)
 		mustStore(t, database, input(func(in *StoreInput) { in.FullContent = "one thing" }))
-		if found, _ := CheckOutputDedup(database, projKey, HashContent("another thing")); found != nil {
+		if found, _ := CheckOutputDedup(database, projKey, HashContent("another thing"), "mcp__github__list_issues", nil); found != nil {
 			t.Error("should be nil")
 		}
 	})
 	t.Run("project scoped", func(t *testing.T) {
 		database := newDB(t)
 		mustStore(t, database, input(func(in *StoreInput) { in.ProjectKey = "otherproject567"; in.FullContent = "shared body" }))
-		if found, _ := CheckOutputDedup(database, projKey, HashContent("shared body")); found != nil {
+		if found, _ := CheckOutputDedup(database, projKey, HashContent("shared body"), "mcp__github__list_issues", nil); found != nil {
 			t.Error("should not cross projects")
 		}
 	})

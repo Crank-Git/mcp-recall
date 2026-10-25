@@ -20,7 +20,7 @@ import (
 // storedColumns is the explicit column list matching StoredOutput scan order.
 const storedColumns = `id, project_key, session_id, tool_name, summary, full_content,
 	original_size, summary_size, created_at, pinned, access_count, last_accessed, input_hash, output_hash,
-	full_retained, command_fp`
+	full_retained, command_fp, delivered_size`
 
 // EffectiveSizeExpr is a row's effective stored size — the bytes it actually
 // occupies. A summary-only row (full_retained = 0, written under
@@ -39,12 +39,13 @@ func scanOutput(s interface {
 	Scan(dest ...any) error
 }) (StoredOutput, error) {
 	var o StoredOutput
-	var lastAccessed sql.NullInt64
+	var lastAccessed, deliveredSize sql.NullInt64
 	var inputHash, outputHash, commandFP sql.NullString
 	err := s.Scan(
 		&o.ID, &o.ProjectKey, &o.SessionID, &o.ToolName, &o.Summary, &o.FullContent,
 		&o.OriginalSize, &o.SummarySize, &o.CreatedAt, &o.Pinned, &o.AccessCount,
 		&lastAccessed, &inputHash, &outputHash, &o.FullRetained, &commandFP,
+		&deliveredSize,
 	)
 	if err != nil {
 		return o, err
@@ -64,6 +65,10 @@ func scanOutput(s interface {
 	if commandFP.Valid {
 		v := commandFP.String
 		o.CommandFP = &v
+	}
+	if deliveredSize.Valid {
+		v := deliveredSize.Int64
+		o.DeliveredSize = &v
 	}
 	return o, nil
 }
@@ -150,12 +155,13 @@ func StoreOutput(database *sql.DB, in StoreInput) (StoredOutput, error) {
 	_, err = tx.Exec(`
 		INSERT INTO stored_outputs
 			(id, project_key, session_id, tool_name, summary, full_content,
-			 original_size, summary_size, created_at, input_hash, output_hash, full_retained, command_fp)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			 original_size, summary_size, created_at, input_hash, output_hash, full_retained, command_fp,
+			 delivered_size)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		id, in.ProjectKey, in.SessionID, in.ToolName,
 		in.Summary, bodyToStore, in.OriginalSize,
 		summarySize, createdAt, nullString(in.InputHash), nullString(outputHash), fullRetained,
-		nullString(in.CommandFP),
+		nullString(in.CommandFP), nullInt(in.DeliveredSize),
 	)
 	if err != nil {
 		tx.Rollback()
@@ -176,7 +182,7 @@ func StoreOutput(database *sql.DB, in StoreInput) (StoredOutput, error) {
 		ToolName: in.ToolName, Summary: in.Summary, FullContent: bodyToStore,
 		OriginalSize: in.OriginalSize, SummarySize: summarySize, CreatedAt: createdAt,
 		Pinned: 0, AccessCount: 0, LastAccessed: nil, InputHash: in.InputHash, OutputHash: outputHash,
-		FullRetained: fullRetained, CommandFP: in.CommandFP,
+		FullRetained: fullRetained, CommandFP: in.CommandFP, DeliveredSize: in.DeliveredSize,
 	}, nil
 }
 
@@ -293,33 +299,18 @@ func PinOutputBounded(database *sql.DB, id, projectKey string, pinned bool, maxP
 	return PinOutcome{OK: true}, nil
 }
 
-// CheckDedup looks up the most recent stored output with a matching input_hash
-// for the project. Returns nil on a miss.
-func CheckDedup(database *sql.DB, projectKey, inputHash string) (*StoredOutput, error) {
+// CheckOutputDedup looks up the most recent stored output whose summary can
+// stand in for this call: identical content (output_hash) from the same tool
+// and, for Bash, the same command family (commandFP; nil matches NULL).
+// Matching on input instead served a re-run its first run's result after the
+// output changed, and matching content across commands delivered one
+// command's summary for another (upstream #324). Returns nil on a miss.
+func CheckOutputDedup(database *sql.DB, projectKey, outputHash, toolName string, commandFP *string) (*StoredOutput, error) {
 	row := database.QueryRow(`
 		SELECT `+storedColumns+` FROM stored_outputs
-		WHERE project_key = ? AND input_hash = ?
+		WHERE project_key = ? AND output_hash = ? AND tool_name = ? AND command_fp IS ?
 		ORDER BY created_at DESC
-		LIMIT 1`, projectKey, inputHash)
-	o, err := scanOutput(row)
-	if err == sql.ErrNoRows {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	return &o, nil
-}
-
-// CheckOutputDedup looks up the most recent stored output whose content matches
-// output_hash — catching identical output produced by a different call (or a
-// call with no tool_input to hash). Returns nil on a miss.
-func CheckOutputDedup(database *sql.DB, projectKey, outputHash string) (*StoredOutput, error) {
-	row := database.QueryRow(`
-		SELECT `+storedColumns+` FROM stored_outputs
-		WHERE project_key = ? AND output_hash = ?
-		ORDER BY created_at DESC
-		LIMIT 1`, projectKey, outputHash)
+		LIMIT 1`, projectKey, outputHash, toolName, nullString(commandFP))
 	o, err := scanOutput(row)
 	if err == sql.ErrNoRows {
 		return nil, nil
