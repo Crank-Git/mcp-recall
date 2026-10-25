@@ -414,8 +414,7 @@ func TestParityGitDiff(t *testing.T) {
 	has(t, s, "-2")
 	has(t, s, "src/foo.ts")
 	has(t, s, "src/bar.ts")
-	has(t, s, "2 hunks")
-	has(t, s, "1 hunk")
+	hasNot(t, s, "2 hunks") // the whole body fits, so no per-file overview
 	has(t, gitDiffHandler("Bash", mustParseT(t, `{"stdout":"","stderr":"","exit_code":0}`)).Summary, "no changes")
 }
 

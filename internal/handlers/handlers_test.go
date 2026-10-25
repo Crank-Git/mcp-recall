@@ -80,7 +80,7 @@ func TestGitDiff(t *testing.T) {
 	if !strings.Contains(r.Summary, "git diff — 1 file changed, +1 -1") {
 		t.Errorf("git diff header missing: %q", r.Summary)
 	}
-	if !strings.Contains(r.Summary, "(1 hunk)") || !strings.Contains(r.Summary, "f.txt") {
+	if !strings.Contains(r.Summary, "@@ -1 +1 @@\n-old\n+new") || !strings.Contains(r.Summary, "f.txt") {
 		t.Errorf("git diff file line wrong: %q", r.Summary)
 	}
 }

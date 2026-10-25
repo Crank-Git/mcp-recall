@@ -6,48 +6,159 @@ package handlers
 import (
 	"fmt"
 	"regexp"
+	"sort"
 	"strings"
 )
 
-type fileDiff struct {
-	path      string
-	additions int
-	deletions int
-	hunks     int
+// diffBodyBytes is the bytes of hunk text a diff summary delivers, shared
+// across files. A diff is read for its lines: a stats-only summary kept 5 of the
+// 49 added lines Claude went on to quote (upstream #389). Diffs a little over
+// this pass through whole, since the hook requires a real saving.
+const diffBodyBytes = 4 * 1024
+
+// maxPreambleLines is the lines of `git show`'s commit header (hash, author,
+// message) kept before the diff.
+const maxPreambleLines = 20
+
+type diffHunk struct {
+	lines []string
+	bytes int
 }
 
-var diffGitPathRe = regexp.MustCompile(`diff --git a/.+ b/(.+)`)
+type fileDiff struct {
+	path string
+	// meta is the `diff --git` line plus mode, rename and binary lines; never
+	// index or ---/+++.
+	meta      []string
+	hunks     []*diffHunk
+	additions int
+	deletions int
+}
 
-func parseGitDiff(text string) []fileDiff {
-	var files []fileDiff
-	var current *fileDiff
+func diffLineBytes(line string) int { return len(line) + 1 }
 
+var (
+	diffGitPathRe = regexp.MustCompile(`diff --git a/.+ b/(.+)`)
+	// git's extended header lines, between `diff --git` and the first hunk.
+	diffExtendedHeaderRe = regexp.MustCompile(`^(old mode|new mode|deleted file mode|new file mode|copy (from|to)|rename (from|to)|(dis)?similarity index|Binary files|GIT binary patch)`)
+	diffNamedLineRe      = regexp.MustCompile(`^(index |--- |\+\+\+ |\s*$)`)
+)
+
+func (f *fileDiff) count(line string) {
+	if strings.HasPrefix(line, "+") {
+		f.additions++
+	} else if strings.HasPrefix(line, "-") {
+		f.deletions++
+	}
+}
+
+// parseGitDiff splits a diff into the text before its first file (git show's
+// commit header) and per-file hunks.
+func parseGitDiff(text string) (preamble []string, files []*fileDiff) {
+	var file *fileDiff
+	var hunk *diffHunk
+	binary := false
 	for _, line := range strings.Split(text, "\n") {
 		switch {
 		case strings.HasPrefix(line, "diff --git "):
-			if current != nil {
-				files = append(files, *current)
-			}
 			path := line[len("diff --git "):]
 			if m := diffGitPathRe.FindStringSubmatch(line); m != nil {
 				path = m[1]
 			}
-			current = &fileDiff{path: path}
-		case current != nil:
-			switch {
-			case strings.HasPrefix(line, "@@ "):
-				current.hunks++
-			case strings.HasPrefix(line, "+") && !strings.HasPrefix(line, "+++"):
-				current.additions++
-			case strings.HasPrefix(line, "-") && !strings.HasPrefix(line, "---"):
-				current.deletions++
+			file = &fileDiff{path: path, meta: []string{line}}
+			files = append(files, file)
+			hunk = nil
+			binary = false
+		case file == nil:
+			preamble = append(preamble, line)
+		case binary || (hunk == nil && diffNamedLineRe.MatchString(line)):
+			// A --binary patch's encoded data, a line the diff --git line
+			// already names, or a blank.
+		case hunk == nil && diffExtendedHeaderRe.MatchString(line):
+			file.meta = append(file.meta, line)
+			binary = strings.HasPrefix(line, "GIT binary patch")
+		case strings.HasPrefix(line, "@@") || hunk == nil:
+			// Anything else before a hunk header opens one, so it stays inside
+			// the budget.
+			hunk = &diffHunk{lines: []string{line}, bytes: diffLineBytes(line)}
+			file.hunks = append(file.hunks, hunk)
+			if !strings.HasPrefix(line, "@@") {
+				file.count(line)
 			}
+		default:
+			hunk.lines = append(hunk.lines, line)
+			hunk.bytes += diffLineBytes(line)
+			file.count(line)
 		}
 	}
-	if current != nil {
-		files = append(files, *current)
+	return preamble, files
+}
+
+// fairShares splits budget so no file gets more than it needs and the rest
+// share what is left.
+func fairShares(sizes []int, budget int) []int {
+	shares := make([]int, len(sizes))
+	order := make([]int, len(sizes))
+	for i := range order {
+		order[i] = i
 	}
-	return files
+	sort.SliceStable(order, func(a, b int) bool { return sizes[order[a]] < sizes[order[b]] })
+	left := budget
+	for k, i := range order {
+		shares[i] = min(sizes[i], left/(len(order)-k))
+		left -= shares[i]
+	}
+	return shares
+}
+
+// renderFile is the file's whole hunks, in order, that fit share, then as much
+// of the next hunk's head as still fits. A file whose share holds no hunk line
+// is left to the per-file overview, so a many-file diff costs no more than that
+// list.
+func renderFile(file *fileDiff, share int) []string {
+	out := append([]string{}, file.meta...)
+	used, whole := 0, 0
+	for whole < len(file.hunks) && used+file.hunks[whole].bytes <= share {
+		out = append(out, file.hunks[whole].lines...)
+		used += file.hunks[whole].bytes
+		whole++
+	}
+	if whole == len(file.hunks) {
+		return out
+	}
+	var fits []string
+	for _, line := range file.hunks[whole].lines {
+		if used+diffLineBytes(line) > share {
+			break
+		}
+		fits = append(fits, line)
+		used += diffLineBytes(line)
+	}
+	// A hunk header with none of its lines shows nothing.
+	var partial []string
+	if len(fits) > 1 {
+		partial = fits
+	}
+	if whole == 0 && len(partial) == 0 {
+		return nil
+	}
+	// A cut hunk counts as elided, with only its unshown lines in the stats.
+	var hidden []string
+	for _, h := range file.hunks[whole:] {
+		hidden = append(hidden, h.lines...)
+	}
+	hidden = hidden[len(partial):]
+	add, del := 0, 0
+	for _, l := range hidden {
+		if strings.HasPrefix(l, "+") {
+			add++
+		} else if strings.HasPrefix(l, "-") {
+			del++
+		}
+	}
+	n := len(file.hunks) - whole
+	out = append(out, partial...)
+	return append(out, fmt.Sprintf("  … %d more %s (+%d -%d) in %s", n, plural(n, "hunk", "hunks"), add, del, file.path))
 }
 
 func gitDiffHandler(toolName string, output any) Result {
@@ -58,8 +169,9 @@ func gitDiffHandler(toolName string, output any) Result {
 		return Result{Summary: "[git diff — no changes]", OriginalSize: originalSize}
 	}
 
-	files := parseGitDiff(stdout)
+	preamble, files := parseGitDiff(stdout)
 	if len(files) == 0 {
+		// Binary diff, submodule change, or unusual output — fall back to shell
 		return shellHandler(toolName, output)
 	}
 
@@ -68,28 +180,47 @@ func gitDiffHandler(toolName string, output any) Result {
 		totalAdded += f.additions
 		totalDeleted += f.deletions
 	}
-	filePlural := "s"
-	if len(files) == 1 {
-		filePlural = ""
+	header := fmt.Sprintf("git diff — %d %s changed, +%d -%d", len(files), plural(len(files), "file", "files"), totalAdded, totalDeleted)
+
+	sizes := make([]int, len(files))
+	for i, f := range files {
+		for _, h := range f.hunks {
+			sizes[i] += h.bytes
+		}
 	}
-	header := fmt.Sprintf("git diff — %d file%s changed, +%d -%d", len(files), filePlural, totalAdded, totalDeleted)
+	shares := fairShares(sizes, diffBodyBytes)
 
 	lines := []string{header}
-	for _, f := range files {
-		stats := fmt.Sprintf("+%d -%d", f.additions, f.deletions)
-		hunkPlural := "s"
-		if f.hunks == 1 {
-			hunkPlural = ""
+	// The per-file list only adds what the body left out; on a whole body it
+	// is overhead.
+	cutAny := false
+	for i := range files {
+		cutAny = cutAny || shares[i] < sizes[i]
+	}
+	if cutAny {
+		for _, f := range files {
+			stats := fmt.Sprintf("+%d -%d", f.additions, f.deletions)
+			hunks := fmt.Sprintf("(%d %s)", len(f.hunks), plural(len(f.hunks), "hunk", "hunks"))
+			lines = append(lines, fmt.Sprintf("  %s  %s  %s", padEnd(f.path, 48), padEnd(stats, 10), hunks))
 		}
-		hunks := fmt.Sprintf("(%d hunk%s)", f.hunks, hunkPlural)
-		lines = append(lines, fmt.Sprintf("  %s  %s  %s", padEnd(f.path, 48), padEnd(stats, 10), hunks))
+		lines = append(lines, "")
+	}
+	if head := strings.TrimSpace(strings.Join(preamble, "\n")); head != "" {
+		headLines := strings.Split(head, "\n")
+		if cut := len(headLines) - maxPreambleLines; cut > 0 {
+			headLines = append(headLines[:maxPreambleLines:maxPreambleLines], fmt.Sprintf("  … %d more commit header lines", cut))
+		}
+		lines = append(append(lines, headLines...), "")
+	}
+	for i, f := range files {
+		lines = append(lines, renderFile(f, shares[i])...)
 	}
 	return Result{Summary: strings.Join(lines, "\n"), OriginalSize: originalSize}
 }
 
 var gitLogOnelineRe = regexp.MustCompile(`^[0-9a-f]{6,40}\s`)
 
-func gitLogHandler(_ string, output any) Result {
+func gitLogHandler(toolName string, output any) Result {
 	stdout := extractStdout(output)
 	originalSize := byteLen(BashOutputText(output))
 
@@ -159,6 +290,12 @@ func gitLogHandler(_ string, output any) Result {
 		}
 	}
 
+	// A custom --format/--pretty parses to nothing; a count is only stated
+	// when parsed (upstream #350).
+	if len(commits) == 0 {
+		return shellHandler(toolName, output)
+	}
+
 	total := len(commits)
 	n := total
 	if n > maxLogCommits {
@@ -178,28 +315,60 @@ func gitLogHandler(_ string, output any) Result {
 	return Result{Summary: strings.Join(out, "\n") + overflow, OriginalSize: originalSize}
 }
 
+// maxStatusPaths is the paths listed per category before the rest are
+// counted. git status is usually short, and the paths are what Claude acts on
+// (a 5-path cap dropped them, upstream #387).
+const maxStatusPaths = 50
+
 var (
-	porcelainRe   = regexp.MustCompile(`^([MADRCU?!]{1,2})\s+(.+)$`)
-	stagedLabelRe = regexp.MustCompile(`^(modified|new file|deleted|renamed):`)
-	unstagLabelRe = regexp.MustCompile(`^(modified|deleted):`)
-	stagedStripRe = regexp.MustCompile(`^(modified|new file|deleted|renamed):\s*`)
-	unstagStripRe = regexp.MustCompile(`^(modified|deleted):\s*`)
+	// Unmerged pairs in porcelain v1 (git-status(1), "Short Format").
+	conflictCodes  = map[string]bool{"DD": true, "AU": true, "UD": true, "UA": true, "DU": true, "AA": true, "UU": true}
+	longConflictRe = regexp.MustCompile(`^(both modified|both added|both deleted|added by us|added by them|deleted by us|deleted by them):\s*`)
+	longEntryRe    = regexp.MustCompile(`^(modified|new file|deleted|renamed|copied|typechange):\s*`)
+	// Kept verbatim: the branch, its upstream and ahead/behind are often why
+	// status was run.
+	branchLineRe = regexp.MustCompile(`^(On branch |HEAD detached |Your branch |## )`)
+	porcelainRe  = regexp.MustCompile(`^([ MTADRCU?!])([ MTADRCU?!]) (.+)$`)
 )
 
-func gitStatusHandler(toolName string, output any) Result {
-	stdout := extractStdout(output)
-	originalSize := byteLen(BashOutputText(output))
+type statusParts struct {
+	branch, staged, unstaged, untracked, conflicts []string
+}
 
-	if strings.TrimSpace(stdout) == "" {
-		return Result{Summary: "[git status — clean working tree]", OriginalSize: originalSize}
+// parsePorcelain parses one porcelain v1 line: two status columns, a space,
+// the path. Matched on the untrimmed line, since a blank first column
+// (" M file", changed but unstaged) is the most common entry.
+func parsePorcelain(line string, parts *statusParts) bool {
+	m := porcelainRe.FindStringSubmatch(line)
+	if m == nil {
+		return false
 	}
+	x, y, path := m[1], m[2], m[3]
+	switch {
+	case conflictCodes[x+y]:
+		parts.conflicts = append(parts.conflicts, x+y+" "+path)
+	case x == "?":
+		parts.untracked = append(parts.untracked, path)
+	case x != "!":
+		if x != " " {
+			parts.staged = append(parts.staged, x+" "+path)
+		}
+		if y != " " {
+			parts.unstaged = append(parts.unstaged, y+" "+path)
+		}
+	}
+	return true
+}
 
-	var staged, unstaged, untracked, conflicts []string
+func parseStatus(stdout string) statusParts {
+	var parts statusParts
 	section := ""
-
 	for _, line := range strings.Split(stdout, "\n") {
 		trimmed := strings.TrimSpace(line)
 		switch {
+		case branchLineRe.MatchString(trimmed):
+			parts.branch = append(parts.branch, trimmed)
+			continue
 		case strings.HasPrefix(trimmed, "Changes to be committed"):
 			section = "staged"
 			continue
@@ -209,60 +378,62 @@ func gitStatusHandler(toolName string, output any) Result {
 		case strings.HasPrefix(trimmed, "Untracked files"):
 			section = "untracked"
 			continue
-		case strings.HasPrefix(trimmed, "both modified") || strings.HasPrefix(trimmed, "both added"):
-			conflicts = append(conflicts, trimmed)
+		case strings.HasPrefix(trimmed, "Unmerged paths"):
+			section = "unmerged"
 			continue
 		}
-		if trimmed == "" || strings.HasPrefix(trimmed, "(") || strings.HasPrefix(trimmed, "no changes") {
+		if trimmed == "" || strings.HasPrefix(trimmed, "(") || strings.HasPrefix(trimmed, "no changes") || strings.HasPrefix(trimmed, "nothing") {
 			continue
 		}
-		if strings.HasPrefix(trimmed, "On branch") || strings.HasPrefix(trimmed, "HEAD") ||
-			strings.HasPrefix(trimmed, "Your branch") || strings.HasPrefix(trimmed, "nothing") {
+		// Long-format entries are tab-indented, so a porcelain line never
+		// starts with a tab.
+		if !strings.HasPrefix(line, "\t") && parsePorcelain(line, &parts) {
 			continue
 		}
-
-		if m := porcelainRe.FindStringSubmatch(line); m != nil {
-			code, file := m[1], m[2]
-			if strings.HasPrefix(code, "?") {
-				untracked = append(untracked, file)
-			} else if code[0] != ' ' && code[0] != '?' {
-				staged = append(staged, string(code[0])+" "+file)
-			}
-			if len(code) >= 2 && code[1] != ' ' && code[1] != '?' {
-				unstaged = append(unstaged, string(code[1])+" "+file)
-			}
-			continue
-		}
-
 		switch {
-		case section == "staged" && stagedLabelRe.MatchString(trimmed):
-			staged = append(staged, trimmed)
-		case section == "unstaged" && unstagLabelRe.MatchString(trimmed):
-			unstaged = append(unstaged, trimmed)
-		case section == "untracked" && trimmed != "" && !strings.HasPrefix(trimmed, "("):
-			untracked = append(untracked, trimmed)
+		case longConflictRe.MatchString(trimmed):
+			parts.conflicts = append(parts.conflicts, longConflictRe.ReplaceAllString(trimmed, ""))
+		case section == "staged" && longEntryRe.MatchString(trimmed):
+			parts.staged = append(parts.staged, longEntryRe.ReplaceAllString(trimmed, ""))
+		case section == "unstaged" && longEntryRe.MatchString(trimmed):
+			parts.unstaged = append(parts.unstaged, longEntryRe.ReplaceAllString(trimmed, ""))
+		case section == "untracked":
+			parts.untracked = append(parts.untracked, trimmed)
 		}
 	}
+	return parts
+}
 
-	if len(staged) == 0 && len(unstaged) == 0 && len(untracked) == 0 && len(conflicts) == 0 {
+func pathList(label string, paths []string) string {
+	return fmt.Sprintf("  %s (%d): %s%s", label, len(paths),
+		strings.Join(firstN(paths, maxStatusPaths), ", "), moreSuffix(len(paths), maxStatusPaths))
+}
+
+func gitStatusHandler(toolName string, output any) Result {
+	stdout := extractStdout(output)
+	originalSize := byteLen(BashOutputText(output))
+
+	if strings.TrimSpace(stdout) == "" {
+		return Result{Summary: "[git status — clean working tree]", OriginalSize: originalSize}
+	}
+
+	p := parseStatus(stdout)
+	if len(p.staged) == 0 && len(p.unstaged) == 0 && len(p.untracked) == 0 && len(p.conflicts) == 0 {
+		// Couldn't parse — fall back to shell
 		return shellHandler(toolName, output)
 	}
 
 	lines := []string{"git status"}
-	if len(conflicts) > 0 {
-		lines = append(lines, fmt.Sprintf("  conflicts (%d): %s", len(conflicts), strings.Join(firstN(conflicts, 5), ", ")))
+	for _, b := range p.branch {
+		lines = append(lines, "  "+b)
 	}
-	if len(staged) > 0 {
-		lines = append(lines, fmt.Sprintf("  staged (%d): %s%s", len(staged),
-			strings.Join(stripEach(firstN(staged, 5), stagedStripRe), ", "), moreSuffix(len(staged), 5)))
-	}
-	if len(unstaged) > 0 {
-		lines = append(lines, fmt.Sprintf("  unstaged (%d): %s%s", len(unstaged),
-			strings.Join(stripEach(firstN(unstaged, 5), unstagStripRe), ", "), moreSuffix(len(unstaged), 5)))
-	}
-	if len(untracked) > 0 {
-		lines = append(lines, fmt.Sprintf("  untracked (%d): %s%s", len(untracked),
-			strings.Join(firstN(untracked, 5), ", "), moreSuffix(len(untracked), 5)))
+	for _, c := range []struct {
+		label string
+		paths []string
+	}{{"conflicts", p.conflicts}, {"staged", p.staged}, {"unstaged", p.unstaged}, {"untracked", p.untracked}} {
+		if len(c.paths) > 0 {
+			lines = append(lines, pathList(c.label, c.paths))
+		}
 	}
 	return Result{Summary: strings.Join(lines, "\n"), OriginalSize: originalSize}
 }
@@ -272,14 +443,6 @@ func firstN(xs []string, n int) []string {
 		return xs
 	}
 	return xs[:n]
-}
-
-func stripEach(xs []string, re *regexp.Regexp) []string {
-	out := make([]string, len(xs))
-	for i, x := range xs {
-		out[i] = re.ReplaceAllString(x, "")
-	}
-	return out
 }
 
 func moreSuffix(total, shown int) string {
