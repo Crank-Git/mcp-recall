@@ -30,6 +30,7 @@ import (
 	"strings"
 	"time"
 
+	"mcprecall/internal/db"
 	"mcprecall/internal/format"
 	"mcprecall/internal/logx"
 )
@@ -389,7 +390,9 @@ type VacuumResult struct {
 }
 
 // VacuumFile runs a full VACUUM: reclaims free pages and upgrades legacy DBs to
-// incremental auto-vacuum.
+// incremental auto-vacuum. Also migrates a legacy FTS index first (upstream
+// #263), so stores that are rarely opened still shed their duplicate copy, and
+// checks the index afterwards (db.VerifyFTSIndex).
 func VacuumFile(file string) VacuumResult {
 	before := dbFootprint(file)
 	database, err := sql.Open("sqlite", file)
@@ -398,7 +401,13 @@ func VacuumFile(file string) VacuumResult {
 	}
 	database.SetMaxOpenConns(1)
 
-	for _, stmt := range []string{"PRAGMA busy_timeout=5000", "PRAGMA auto_vacuum=INCREMENTAL", "VACUUM"} {
+	if _, err := database.Exec("PRAGMA busy_timeout=5000"); err != nil {
+		database.Close()
+		logx.Warn(fmt.Sprintf("vacuum failed for %s — %v", filepath.Base(file), err))
+		return VacuumResult{Err: err}
+	}
+	db.MigrateFTSToExternalContent(database)
+	for _, stmt := range []string{"PRAGMA auto_vacuum=INCREMENTAL", "VACUUM"} {
 		if _, err := database.Exec(stmt); err != nil {
 			database.Close()
 			// VACUUM is atomic — a failure leaves the DB intact. Log the real
@@ -407,8 +416,10 @@ func VacuumFile(file string) VacuumResult {
 			return VacuumResult{Err: err}
 		}
 	}
-	// Close before measuring: in WAL mode the rewrite sits in the -wal file
-	// until the close checkpoints and removes it.
+	db.VerifyFTSIndex(database)
+	// A session's MCP server may hold the store open, so the close below would
+	// not remove the WAL; truncate it explicitly (upstream #292).
+	db.TruncateWAL(database)
 	database.Close()
 	return VacuumResult{Before: before, After: dbFootprint(file)}
 }

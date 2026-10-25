@@ -636,6 +636,7 @@ func ReclaimPages(database *sql.DB, deleted int) {
 	if _, err := database.Exec("PRAGMA incremental_vacuum"); err != nil {
 		logx.Warn("incremental_vacuum failed — " + err.Error())
 	}
+	TruncateWAL(database)
 }
 
 // SetMeta upserts a key/value pair into the per-project meta table.
