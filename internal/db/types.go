@@ -138,7 +138,7 @@ type LastSession struct {
 
 // ContextData is the session-orientation snapshot in five isolated sections.
 type ContextData struct {
-	Pinned      []StoredOutput
+	Pinned      SessionSample
 	Notes       []StoredOutput
 	Recent      []StoredOutput
 	Hot         []StoredOutput
@@ -165,17 +165,29 @@ type TopAccessed struct {
 	AccessCount int
 }
 
-// PinnedItem is a pinned item reference within a session summary.
-type PinnedItem struct {
-	ID       string
-	ToolName string
-	Summary  string
+// SampledItem is a sampled row: display columns only, no full_content.
+type SampledItem struct {
+	ID           string
+	SessionID    string
+	ToolName     string
+	Summary      string
+	CreatedAt    int64
+	LastAccessed *int64
 }
 
-// NoteItem is a note reference within a session summary.
-type NoteItem struct {
-	ID      string
-	Summary string
+// SessionOverflow counts the rows of one session left out of a sample.
+type SessionOverflow struct {
+	SessionID string
+	Count     int
+}
+
+// SessionSample is a bounded, session-fair sample of a row set that a bulk
+// writer can grow to thousands (upstream #269, #336). Total is the real count;
+// Overflow counts the rows left out of Items per session, largest first.
+type SessionSample struct {
+	Items    []SampledItem
+	Total    int
+	Overflow []SessionOverflow
 }
 
 // SessionSummaryData is the digest returned by GetSessionSummary.
@@ -188,6 +200,6 @@ type SessionSummaryData struct {
 	AccessedCount      int
 	TotalAccesses      int
 	TopAccessed        []TopAccessed
-	Pinned             []PinnedItem
-	Notes              []NoteItem
+	Pinned             SessionSample
+	Notes              SessionSample
 }

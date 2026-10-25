@@ -209,11 +209,17 @@ func TestSessionStartTruncatesLarge(t *testing.T) {
 	var pk string
 	currentCWD, pk = hookEnv(t)
 	database, _ := db.Open(os.Getenv("RECALL_DB_PATH"))
-	for i := 0; i < 15; i++ {
-		s, _ := db.StoreOutput(database, db.StoreInput{ProjectKey: pk, SessionID: "sess-inject-002",
+	// Fill the bounded sections to push the formatted snapshot past 2000 chars:
+	// ten pins (one per session, so the per-session cap doesn't thin them) and
+	// ten unpinned notes, ~200 chars each ≈ 4000 chars.
+	for i := 0; i < 10; i++ {
+		s, _ := db.StoreOutput(database, db.StoreInput{ProjectKey: pk, SessionID: "sess-inject-002-" + itoa(i),
 			ToolName: "mcp__github__list_issues", Summary: "pinned item " + itoa(i) + " — " + strings.Repeat("x", 80),
-			FullContent: "full", OriginalSize: 100})
+			FullContent: "full " + itoa(i), OriginalSize: 100})
 		db.PinOutput(database, s.ID, pk, true)
+		db.StoreOutput(database, db.StoreInput{ProjectKey: pk, SessionID: "sess-inject-002",
+			ToolName: "recall__note", Summary: "note " + itoa(i) + " — " + strings.Repeat("y", 80),
+			FullContent: "note body " + itoa(i), OriginalSize: 100})
 	}
 	database.Close()
 	snap := HandleSessionStart(sessionStart(nil))

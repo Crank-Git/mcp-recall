@@ -5,6 +5,7 @@ package db
 
 import (
 	"database/sql"
+	"sort"
 	"time"
 )
 
@@ -168,6 +169,82 @@ func GetSuggestions(database *sql.DB, projectKey string, opts SuggestionsOptions
 	return SuggestionsData{PinCandidates: pin, StaleCandidates: stale}
 }
 
+// SampleLimit is the most rows a sampleBySession sample returns, across all
+// sessions.
+const SampleLimit = 10
+
+// SamplePerSession is the most rows any one session contributes to a sample
+// spanning sessions.
+const SamplePerSession = 3
+
+// sampleBySession samples the rows matching where without letting one session
+// fill the sample: each session contributes at most perSession, and slots are
+// dealt round-robin (every session's best row before any session's second),
+// best meaning most recently accessed, then newest. A bulk writer can put
+// thousands of rows in one session (upstream #269), so callers that list rows
+// to Claude use this rather than an unbounded SELECT. full_content is never read.
+func sampleBySession(database *sql.DB, where string, params []any, perSession int) SessionSample {
+	sample := SessionSample{Items: []SampledItem{}, Overflow: []SessionOverflow{}}
+	rows, err := database.Query(`
+		WITH ranked AS (
+			SELECT id, session_id, tool_name, summary, created_at, last_accessed,
+				ROW_NUMBER() OVER (
+					PARTITION BY session_id
+					ORDER BY last_accessed DESC NULLS LAST, created_at DESC
+				) AS rn
+			FROM stored_outputs
+			`+where+`
+		)
+		SELECT id, session_id, tool_name, summary, created_at, last_accessed
+		FROM ranked
+		WHERE rn <= ?
+		ORDER BY rn, last_accessed DESC NULLS LAST, created_at DESC
+		LIMIT ?`, append(append([]any{}, params...), perSession, SampleLimit)...)
+	if err != nil {
+		return sample
+	}
+	shown := map[string]int{}
+	for rows.Next() {
+		var it SampledItem
+		var la sql.NullInt64
+		if rows.Scan(&it.ID, &it.SessionID, &it.ToolName, &it.Summary, &it.CreatedAt, &la) == nil {
+			if la.Valid {
+				v := la.Int64
+				it.LastAccessed = &v
+			}
+			sample.Items = append(sample.Items, it)
+			shown[it.SessionID]++
+		}
+	}
+	rows.Close()
+
+	counts, err := database.Query(`
+		SELECT session_id, COUNT(*) FROM stored_outputs `+where+`
+		GROUP BY session_id`, params...)
+	if err != nil {
+		return sample
+	}
+	for counts.Next() {
+		var o SessionOverflow
+		if counts.Scan(&o.SessionID, &o.Count) == nil {
+			sample.Total += o.Count
+			o.Count -= shown[o.SessionID]
+			if o.Count > 0 {
+				sample.Overflow = append(sample.Overflow, o)
+			}
+		}
+	}
+	counts.Close()
+	sort.Slice(sample.Overflow, func(i, j int) bool {
+		a, b := sample.Overflow[i], sample.Overflow[j]
+		if a.Count != b.Count {
+			return a.Count > b.Count
+		}
+		return a.SessionID < b.SessionID
+	})
+	return sample
+}
+
 // GetSessionSummary returns a digest of stored activity for a session or day.
 func GetSessionSummary(database *sql.DB, projectKey string, opts SessionSummaryOptions) SessionSummaryData {
 	var filter, label string
@@ -228,29 +305,15 @@ func GetSessionSummary(database *sql.DB, projectKey string, opts SessionSummaryO
 		rows.Close()
 	}
 
-	if rows, err := database.Query(`
-		SELECT id, tool_name, summary FROM stored_outputs `+base+` AND pinned = 1
-		ORDER BY created_at DESC`, bp...); err == nil {
-		for rows.Next() {
-			var p PinnedItem
-			if rows.Scan(&p.ID, &p.ToolName, &p.Summary) == nil {
-				d.Pinned = append(d.Pinned, p)
-			}
-		}
-		rows.Close()
+	// A single-session summary has one session to sample, so it gets every
+	// slot. Notes are unpinned ones only, as in GetContext: a pinned note is
+	// listed under pinned, not twice (upstream #343).
+	perSession := SamplePerSession
+	if opts.SessionID != "" {
+		perSession = SampleLimit
 	}
-
-	if rows, err := database.Query(`
-		SELECT id, summary FROM stored_outputs `+base+` AND tool_name = 'recall__note'
-		ORDER BY created_at DESC`, bp...); err == nil {
-		for rows.Next() {
-			var n NoteItem
-			if rows.Scan(&n.ID, &n.Summary) == nil {
-				d.Notes = append(d.Notes, n)
-			}
-		}
-		rows.Close()
-	}
+	d.Pinned = sampleBySession(database, base+" AND pinned = 1", bp, perSession)
+	d.Notes = sampleBySession(database, base+" AND pinned = 0 AND tool_name = 'recall__note'", bp, perSession)
 
 	return d
 }
@@ -268,12 +331,8 @@ func GetContext(database *sql.DB, projectKey string, days, limit int) ContextDat
 
 	var cd ContextData
 
-	if rows, err := database.Query(`
-		SELECT `+storedColumns+` FROM stored_outputs
-		WHERE project_key = ? AND pinned = 1
-		ORDER BY last_accessed DESC NULLS LAST, created_at DESC`, projectKey); err == nil {
-		cd.Pinned, _ = scanOutputs(rows)
-	}
+	// Pinned items, bounded and session-fair (upstream #269).
+	cd.Pinned = sampleBySession(database, "WHERE project_key = ? AND pinned = 1", []any{projectKey}, SamplePerSession)
 
 	if rows, err := database.Query(`
 		SELECT `+storedColumns+` FROM stored_outputs
@@ -317,7 +376,7 @@ func GetContext(database *sql.DB, projectKey string, days, limit int) ContextDat
 		startOfDay := startOfDayUnix(lastDate)
 		endOfDay := startOfDay + 86400
 		exclude := map[string]bool{}
-		for _, i := range cd.Pinned {
+		for _, i := range cd.Pinned.Items {
 			exclude[i.ID] = true
 		}
 		for _, i := range cd.Notes {

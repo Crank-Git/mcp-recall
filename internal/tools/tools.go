@@ -553,6 +553,39 @@ func ListStored(database *sql.DB, projectKey string, args ListStoredArgs) string
 
 // ── recall__context ───────────────────────────────────────────────────────────
 
+// overflowSessions is how many sessions a sample's overflow line names.
+const overflowSessions = 3
+
+// formatSampleCount is a sample's count for a section heading: "7", or
+// "10 of 4,522" when rows were left out.
+func formatSampleCount(sample db.SessionSample) string {
+	if len(sample.Overflow) > 0 {
+		return fmt.Sprintf("%d of %s", len(sample.Items), groupInt(sample.Total))
+	}
+	return strconv.Itoa(len(sample.Items))
+}
+
+// formatSampleOverflow is one line naming where a sample's left-out rows live,
+// largest session first.
+func formatSampleOverflow(overflow []db.SessionOverflow) string {
+	var named []string
+	for i, o := range overflow {
+		if i == overflowSessions {
+			break
+		}
+		named = append(named, fmt.Sprintf("+%s more from %s", groupInt(o.Count), o.SessionID))
+	}
+	if rest := overflow[min(len(overflow), overflowSessions):]; len(rest) > 0 {
+		restCount := 0
+		for _, o := range rest {
+			restCount += o.Count
+		}
+		named = append(named, fmt.Sprintf("+%s more from %d other sessions", groupInt(restCount), len(rest)))
+	}
+	return "  " + strings.Join(named, " · ") + "\n" +
+		"    (recall__list_stored to browse; recall__forget session_id clears a session, force: true for pinned)"
+}
+
 type ContextArgs struct {
 	Days  int
 	Limit int
@@ -562,7 +595,7 @@ func Context(database *sql.DB, projectKey string, args ContextArgs) string {
 	data := db.GetContext(database, projectKey, args.Days, args.Limit)
 	today := time.Now().UTC().Format("2006-01-02")
 
-	isEmpty := len(data.Pinned) == 0 && len(data.Notes) == 0 && len(data.Recent) == 0 &&
+	isEmpty := len(data.Pinned.Items) == 0 && len(data.Notes) == 0 && len(data.Recent) == 0 &&
 		len(data.Hot) == 0 && data.LastSession == nil
 	if isEmpty {
 		return ContextEmptyResponse
@@ -574,9 +607,9 @@ func Context(database *sql.DB, projectKey string, args ContextArgs) string {
 		"Generated " + format.RelativeTime(0),
 	}
 
-	if len(data.Pinned) > 0 {
-		lines = append(lines, "", fmt.Sprintf("Pinned (%d):", len(data.Pinned)))
-		for _, item := range data.Pinned {
+	if len(data.Pinned.Items) > 0 {
+		lines = append(lines, "", fmt.Sprintf("Pinned (%s):", formatSampleCount(data.Pinned)))
+		for _, item := range data.Pinned.Items {
 			excerpt := oneline(firstChars(item.Summary, contextExcerptLen))
 			ellipsis := ""
 			if runeLen(item.Summary) > contextExcerptLen {
@@ -584,6 +617,9 @@ func Context(database *sql.DB, projectKey string, args ContextArgs) string {
 			}
 			lines = append(lines, fmt.Sprintf("  📌 %s  %s  %s", item.ID, padEnd(item.ToolName, listToolColWidth), formatDate(item.CreatedAt)))
 			lines = append(lines, "    "+excerpt+ellipsis)
+		}
+		if len(data.Pinned.Overflow) > 0 {
+			lines = append(lines, formatSampleOverflow(data.Pinned.Overflow))
 		}
 	}
 
@@ -695,9 +731,9 @@ func SessionSummary(database *sql.DB, projectKey string, args SessionSummaryArgs
 		}
 	}
 
-	if len(data.Pinned) > 0 {
-		lines = append(lines, "", fmt.Sprintf("Pinned: %d", len(data.Pinned)))
-		for _, item := range data.Pinned {
+	if len(data.Pinned.Items) > 0 {
+		lines = append(lines, "", "Pinned: "+formatSampleCount(data.Pinned))
+		for _, item := range data.Pinned.Items {
 			excerpt := oneline(firstChars(item.Summary, contextExcerptLen))
 			ellipsis := ""
 			if runeLen(item.Summary) > contextExcerptLen {
@@ -706,17 +742,23 @@ func SessionSummary(database *sql.DB, projectKey string, args SessionSummaryArgs
 			lines = append(lines, fmt.Sprintf("  📌 %s  %s", item.ID, item.ToolName))
 			lines = append(lines, "    "+excerpt+ellipsis)
 		}
+		if len(data.Pinned.Overflow) > 0 {
+			lines = append(lines, formatSampleOverflow(data.Pinned.Overflow))
+		}
 	}
 
-	if len(data.Notes) > 0 {
-		lines = append(lines, "", fmt.Sprintf("Notes: %d", len(data.Notes)))
-		for _, note := range data.Notes {
+	if len(data.Notes.Items) > 0 {
+		lines = append(lines, "", "Notes: "+formatSampleCount(data.Notes))
+		for _, note := range data.Notes.Items {
 			excerpt := oneline(firstChars(note.Summary, 100))
 			ellipsis := ""
 			if runeLen(note.Summary) > 100 {
 				ellipsis = "…"
 			}
 			lines = append(lines, fmt.Sprintf("  %s — %s%s", note.ID, excerpt, ellipsis))
+		}
+		if len(data.Notes.Overflow) > 0 {
+			lines = append(lines, formatSampleOverflow(data.Notes.Overflow))
 		}
 	}
 
