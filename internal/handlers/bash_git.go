@@ -58,7 +58,8 @@ func parseGitDiff(text string) (preamble []string, files []*fileDiff) {
 	var file *fileDiff
 	var hunk *diffHunk
 	binary := false
-	for _, line := range strings.Split(text, "\n") {
+	for _, raw := range strings.Split(text, "\n") {
+		line := clipLine(raw, MaxLineChars)
 		switch {
 		case strings.HasPrefix(line, "diff --git "):
 			path := line[len("diff --git "):]

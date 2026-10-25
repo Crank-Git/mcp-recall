@@ -196,3 +196,11 @@ func TestGitStatusUpstream(t *testing.T) {
 
 	has(t, status(t, "R  src/old.ts -> src/new.ts\n"), "src/old.ts -> src/new.ts")
 }
+
+func TestGitDiffClipsOverWideLine(t *testing.T) {
+	stdout := "diff --git a/x.min.js b/x.min.js\n@@ -1 +1 @@\n+" + strings.Repeat("x", 20_000)
+	s := diffSummary(t, stdout)
+	if !regexp.MustCompile(`… \(\+\d+ chars\)`).MatchString(s) {
+		t.Fatalf("over-wide diff line not clipped:\n%.300s", s)
+	}
+}
