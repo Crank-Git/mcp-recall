@@ -17,9 +17,9 @@ const MaxLineChars = 4000
 
 var clipMarkerRe = regexp.MustCompile(`(?m)… \(\+\d+ chars\)$`)
 
-// utf16Len is the length of s in UTF-16 code units, as JavaScript counts it, so
+// UTF16Len is the length of s in UTF-16 code units, as JavaScript counts it, so
 // the cap and the elided count match upstream.
-func utf16Len(s string) int {
+func UTF16Len(s string) int {
 	n := 0
 	for _, r := range s {
 		if r >= 0x10000 {
@@ -38,7 +38,7 @@ func clipLine(line string, max int) string {
 	if len(line) <= max { // bytes >= UTF-16 units
 		return line
 	}
-	total := utf16Len(line)
+	total := UTF16Len(line)
 	if total <= max {
 		return line
 	}

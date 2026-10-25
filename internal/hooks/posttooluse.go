@@ -9,6 +9,8 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -103,6 +105,75 @@ func withPersistedOutput(toolResponse any) any {
 	return full
 }
 
+// savedResultRe matches the notice Claude Code hands the hook in place of an
+// MCP result it saved to a file. Since 2.1.305 the count can read "N
+// characters across M lines" (upstream #401).
+var savedResultRe = regexp.MustCompile(`^Error: result \(([\d,]+) characters(?: across ([\d,]+) lines?)?\) exceeds maximum allowed tokens\. Output has been saved to (.+?)\.(?:\n|$)`)
+
+// hasLines reports whether text has lines lines. A final newline may or may
+// not end a line of its own in Claude Code's count, so both readings are
+// accepted; the exact character count already rules out a different file.
+func hasLines(text string, lines int) bool {
+	segments := strings.Count(text, "\n") + 1
+	return segments == lines || (strings.HasSuffix(text, "\n") && segments-1 == lines)
+}
+
+func countArg(s string) int {
+	n, _ := strconv.Atoi(strings.ReplaceAll(s, ",", ""))
+	return n
+}
+
+// withSavedMcpResult returns the MCP result Claude Code saved to a file in
+// place of the notice naming it. Above 25,000 tokens or 50,000 characters
+// Claude Code saves a successful MCP result to a tool-results directory and
+// hands this hook a notice, so storing what arrives keeps none of the result
+// (upstream #391). The file is read back, in the shape the notice came in,
+// when it is plainly the one Claude Code wrote: absolute, in a tool-results
+// directory, and exactly the stated number of characters (and of lines, when
+// the notice gives them). Returns false for a notice whose file fails those
+// checks: it is then passed through whole, keeping the path and Claude Code's
+// instructions for reading it. Any other response is returned as it is.
+func withSavedMcpResult(toolResponse any) (any, bool) {
+	text, ok := handlers.ContentBlockText(toolResponse)
+	if !ok {
+		text, _ = toolResponse.(string)
+	}
+	m := savedResultRe.FindStringSubmatch(text)
+	if m == nil {
+		return toolResponse, true
+	}
+	chars, path := countArg(m[1]), m[3]
+	if !filepath.IsAbs(path) || filepath.Base(filepath.Dir(path)) != "tool-results" {
+		return nil, false
+	}
+	info, err := os.Stat(path)
+	if err != nil || info.Size() > maxPersistedBytes {
+		return nil, false
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		logx.Debug(fmt.Sprintf("saved MCP result unreadable · %s · %v", path, err))
+		return nil, false
+	}
+	saved := string(data)
+	if handlers.UTF16Len(saved) != chars || (m[2] != "" && !hasLines(saved, countArg(m[2]))) {
+		return nil, false
+	}
+	if _, isString := toolResponse.(string); isString {
+		return saved, true
+	}
+	// Never a bare array: ExtractText keeps a top-level array as JSON, not text.
+	base := jsonx.NewObj()
+	if obj, isObj := toolResponse.(*jsonx.Obj); isObj {
+		base = obj.Clone()
+	}
+	block := jsonx.NewObj()
+	block.Set("type", "text")
+	block.Set("text", saved)
+	base.Set("content", []any{block})
+	return base, true
+}
+
 // replaceOutput replaces the tool's output with text via
 // hookSpecificOutput.updatedToolOutput; the top-level field alone is silently
 // ignored (upstream #298). For a built-in tool the replacement must match that
@@ -162,6 +233,18 @@ func HandlePostToolUse(raw string) HookOutput {
 	if denylist.IsDenied(toolName, cfg) {
 		logx.Debug("SKIP denylist · " + toolName)
 		return HookOutput{}
+	}
+
+	// The saved result, not the notice Claude Code hands over in its place
+	// (upstream #391). After the denylist, so a denied tool's saved output is
+	// never read.
+	if strings.HasPrefix(toolName, "mcp__") {
+		saved, ok := withSavedMcpResult(toolResponse)
+		if !ok {
+			logx.Debug("SKIP saved-result-unverified · " + toolName)
+			return HookOutput{}
+		}
+		response = saved
 	}
 
 	// 2. Extract text and check for secrets. For Bash that is stdout + stderr:

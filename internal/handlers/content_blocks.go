@@ -146,6 +146,18 @@ func joinTextBlocks(blocks []contentBlock) string {
 	return strings.Join(texts, "\n")
 }
 
+// ContentBlockText is the joined text of an MCP content-block response, top
+// level or wrapped, and whether output is one. Unlike ExtractText it never
+// keeps a text-only top-level array as JSON, which would hide a notice in it
+// (upstream #391).
+func ContentBlockText(output any) (string, bool) {
+	blocks := asContentBlocks(output)
+	if blocks == nil {
+		return "", false
+	}
+	return joinTextBlocks(blocks), true
+}
+
 // payloadByteLength is the byte size of the raw payload, image bytes included.
 func payloadByteLength(output any) int {
 	if s, ok := output.(string); ok {

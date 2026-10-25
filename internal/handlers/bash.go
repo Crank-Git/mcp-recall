@@ -884,6 +884,40 @@ func IsContentRead(command string) bool {
 	return false
 }
 
+// pipeFilterRe matches commands that only filter the lines piped into them, so
+// a file read stays one.
+var (
+	pipeFilterRe = regexp.MustCompile(`^(grep|egrep|fgrep|rg|head|tail|sed|awk|cut|sort|uniq|wc|tr|nl|column|less|cat)(\s|$)`)
+	catHeredocRe = regexp.MustCompile(`^cat\s+<<`)
+	fileReadRe   = regexp.MustCompile(`^(cat|head|tail)(\s|$)`)
+	rtkFileRe    = regexp.MustCompile(`^rtk\s+(?:-\S+\s+)*read(\s|$)`)
+)
+
+// isFileRead reports whether the output comes from a file rather than a run:
+// the pipeline starts with cat, head, tail, a `sed -n` range or `rtk read`,
+// and only filters follow. `journalctl | head`, `cat q.sql | psql` and `cat
+// <<EOF | ssh h` are runs, so their failure lines still surface (upstream
+// #358).
+func isFileRead(command string) bool {
+	segments := splitTopLevel(command)
+	if len(segments) == 0 {
+		return false
+	}
+	first := NormalizeCommand(segments[0])
+	if catHeredocRe.MatchString(first) {
+		return false
+	}
+	if !fileReadRe.MatchString(first) && !sedLineRangeRe.MatchString(first) && !rtkFileRe.MatchString(first) {
+		return false
+	}
+	for _, s := range segments[1:] {
+		if !pipeFilterRe.MatchString(NormalizeCommand(s)) {
+			return false
+		}
+	}
+	return true
+}
+
 // IsCompoundCommand reports whether command runs more than one command in
 // sequence: a `;`, `&&`, `||` or newline outside quotes, escapes and `( … )` /
 // `$( … )`, with a command after it. A pipe is not a separator: it yields one
@@ -971,6 +1005,9 @@ func GetBashHandler(input any) Handler {
 	if IsCompoundCommand(command) {
 		return compoundHandler
 	}
+	if isFileRead(command) {
+		return contentReadHandler
+	}
 	// rtk reshapes output (a diff without its headers), so a parser for the
 	// raw command could read it wrong and claim a false count, the #350 class
 	// (upstream #353).
@@ -1028,7 +1065,7 @@ var readsStderr = map[uintptr]bool{}
 
 func init() {
 	for _, h := range []Handler{
-		shellHandler, compoundHandler, testRunnerHandler, buildToolHandler,
+		shellHandler, contentReadHandler, compoundHandler, testRunnerHandler, buildToolHandler,
 		compilerDiagnosticsHandler, packageInstallHandler,
 	} {
 		readsStderr[reflect.ValueOf(h).Pointer()] = true
