@@ -153,7 +153,7 @@ func tick(ok bool) string {
 }
 
 func printStatus(r install.StatusReport) {
-	full := r.ServerRegistered && r.SessionStartHook && r.PostToolUseHook && r.ClaudeMD && r.BinaryExists
+	full := r.ServerRegistered && r.SessionStartHook && r.PostToolUseHook && r.ClaudeMD && r.FilesOK()
 	state := "not installed"
 	if full {
 		state = "installed"
@@ -165,7 +165,22 @@ func printStatus(r install.StatusReport) {
 	fmt.Printf("  %s SessionStart hook\n", tick(r.SessionStartHook))
 	fmt.Printf("  %s PostToolUse hook\n", tick(r.PostToolUseHook))
 	fmt.Printf("  %s CLAUDE.md instructions\n", tick(r.ClaudeMD))
-	fmt.Printf("  %s binary present\n", tick(r.BinaryExists))
+	// What the registered entries run, which may be another install's
+	// (upstream #364).
+	if len(r.Files) > 0 {
+		fmt.Println("\n  Registered launch")
+		for _, f := range r.Files {
+			fmt.Printf("  %s %s %s\n", tick(f.Exists), f.Label, f.Path)
+		}
+	}
+	if r.RegisteredCommand != "" {
+		fmt.Printf("\n  Registered: %s; this is %s.\n",
+			install.DescribeLaunch(r.RegisteredCommand), install.DescribeLaunch(install.DefaultPaths().Binary))
+		fmt.Println("  Run `mcprecall install` from this one to switch Claude Code to it.")
+	}
+	if !full && !r.FilesOK() {
+		fmt.Println("\n  Run `mcprecall install` from the install Claude Code should use: what is marked ✗ is gone")
+	}
 	fmt.Println()
 	printStoreFootprint(gc.StoreFootprint(db.DataDir()), config.Load().Store.GCReminderMB)
 }
