@@ -387,3 +387,41 @@ func TestImportCleanDumpReportsNoWithheld(t *testing.T) {
 		t.Errorf("output:\n%s", out)
 	}
 }
+
+// Upstream #411: rows are validated one at a time and validation stops at the
+// issues it reports, so a large file that is not a dump fails fast.
+func TestDecodeExportStopsAtReportedIssues(t *testing.T) {
+	nums := "[" + strings.TrimSuffix(strings.Repeat("1,", 200000), ",") + "]"
+	items, issues, err := decodeExport(nums)
+	if err != nil || items != nil || len(issues) != maxReportedIssues {
+		t.Fatalf("items=%d issues=%v err=%v", len(items), issues, err)
+	}
+	if !strings.HasPrefix(issues[0], "[0]") || !strings.HasPrefix(issues[4], "[4]") {
+		t.Errorf("issues = %v", issues)
+	}
+}
+
+func TestDecodeExportShapes(t *testing.T) {
+	if _, issues, err := decodeExport(`{"a":1}`); err != nil || len(issues) != 1 || !strings.Contains(issues[0], "expected an array") {
+		t.Errorf("object: issues=%v err=%v", issues, err)
+	}
+	if _, _, err := decodeExport("not json at all"); err == nil {
+		t.Error("malformed JSON accepted")
+	}
+	if _, _, err := decodeExport(`[] trailing`); err == nil {
+		t.Error("trailing data accepted")
+	}
+	if _, _, err := decodeExport(`[{"id":"x"}`); err == nil {
+		t.Error("unterminated array accepted")
+	}
+	// A bad row among good ones is reported with its index.
+	good := `{"id":"recall_a","project_key":"p","session_id":"s","tool_name":"t","summary":"","full_content":"","original_size":1,"summary_size":1,"created_at":1,"pinned":0,"access_count":0,"last_accessed":null,"input_hash":null}`
+	items, issues, err := decodeExport("[" + good + `,{"id":"x","created_at":"soon"}]`)
+	if err != nil || items != nil || len(issues) == 0 || !strings.HasPrefix(issues[0], "[1") {
+		t.Errorf("items=%d issues=%v err=%v", len(items), issues, err)
+	}
+	items, issues, err = decodeExport("[" + good + "," + good + "]")
+	if err != nil || len(issues) != 0 || len(items) != 2 {
+		t.Errorf("valid dump: items=%d issues=%v err=%v", len(items), issues, err)
+	}
+}
