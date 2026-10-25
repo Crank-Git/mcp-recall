@@ -34,9 +34,8 @@ var timestampRes = []*regexp.Regexp{
 var (
 	pidRe  = regexp.MustCompile(`\[\d+\]`)
 	uuidRe = regexp.MustCompile(`(?i)\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b`)
-	// Upstream requires a digit and a letter by lookahead, so a word like
-	// `deadbeef` or a plain number is never masked; RE2 has none, so
-	// maskHex checks each match instead.
+	// Upstream requires a digit and a letter by lookahead; RE2 has none, so
+	// repeatKey checks each match instead.
 	hexIDRe     = regexp.MustCompile(`\b[0-9a-f]{8,}\b`)
 	hexDigitRe  = regexp.MustCompile(`\d`)
 	hexLetterRe = regexp.MustCompile(`[a-f]`)
@@ -64,15 +63,6 @@ func runePrefix(s string, n int) string {
 	return s[:i]
 }
 
-func maskHex(s string) string {
-	return hexIDRe.ReplaceAllStringFunc(s, func(m string) string {
-		if hexDigitRe.MatchString(m) && hexLetterRe.MatchString(m) {
-			return "<hex>"
-		}
-		return m
-	})
-}
-
 // isLogLine reports whether line opens with a timestamp, as a log line does.
 // A `|` before it marks a table row (`2026-09-26 | 11:00:00 | closed`), whose
 // times are data.
@@ -82,21 +72,38 @@ func isLogLine(line string) bool {
 	if !hhmmssRe.MatchString(head) {
 		return false
 	}
-	start := -1
-	for _, re := range timestampRes {
-		if loc := re.FindStringIndex(head); loc != nil && (start < 0 || loc[0] < start) {
-			start = loc[0]
-		}
-	}
-	if start < 0 {
+	// Leftmost-first: the match starts where the earliest timestamp form does.
+	loc := anyTimestampRe.FindStringIndex(head)
+	if loc == nil {
 		return false
 	}
+	start := loc[0]
 	prefix := strings.TrimSpace(line[:start])
 	if strings.Contains(prefix, "|") {
 		return false
 	}
 	return prefix == "" || len(strings.Fields(prefix)) <= maxWordsBeforeTimestamp
 }
+
+// anyTimestampRe matches any of timestampRes, starting at the earliest.
+var anyTimestampRe = regexp.MustCompile(
+	timestampRes[0].String() + `|` + timestampRes[1].String() + `|` + timestampRes[2].String())
+
+// volatileRe matches every volatile token in one pass, in upstream's masking
+// order: the timestamp forms, a bracketed PID, a UUID, a hex id, a duration.
+// Go's alternation is leftmost-first, so where two match at one position the
+// earlier wins, as when upstream masks them one after another; one pass is
+// several times faster than seven on a large log.
+var volatileRe = regexp.MustCompile(
+	anyTimestampRe.String() + `|(?P<pid>` + pidRe.String() + `)|(?P<uuid>` + uuidRe.String() + `)|(?P<hex>` + hexIDRe.String() +
+		`)|(?P<dur>` + durationRe.String() + `)`)
+
+var (
+	pidGroup  = volatileRe.SubexpIndex("pid")
+	uuidGroup = volatileRe.SubexpIndex("uuid")
+	hexGroup  = volatileRe.SubexpIndex("hex")
+	durGroup  = volatileRe.SubexpIndex("dur")
+)
 
 // repeatKey returns line with its volatile tokens masked: the key two repeats
 // share. Only a log line is masked; in any other line a timestamp or id may be
@@ -106,14 +113,37 @@ func repeatKey(line string) string {
 	if !isLogLine(line) {
 		return line
 	}
-	s := line
-	for _, re := range timestampRes {
-		s = re.ReplaceAllString(s, "<ts>")
+	var b strings.Builder
+	last := 0
+	for _, m := range volatileRe.FindAllStringSubmatchIndex(line, -1) {
+		tok := line[m[0]:m[1]]
+		var mask string
+		switch {
+		case m[2*pidGroup] >= 0:
+			mask = "[<pid>]"
+		case m[2*uuidGroup] >= 0:
+			mask = "<uuid>"
+		case m[2*hexGroup] >= 0:
+			// Upstream requires a digit and a letter by lookahead, so a word
+			// like `deadbeef` or a plain number is never masked.
+			if !hexDigitRe.MatchString(tok) || !hexLetterRe.MatchString(tok) {
+				continue
+			}
+			mask = "<hex>"
+		case m[2*durGroup] >= 0:
+			mask = "<dur>"
+		default:
+			mask = "<ts>"
+		}
+		b.WriteString(line[last:m[0]])
+		b.WriteString(mask)
+		last = m[1]
 	}
-	s = pidRe.ReplaceAllString(s, "[<pid>]")
-	s = uuidRe.ReplaceAllString(s, "<uuid>")
-	s = maskHex(s)
-	return durationRe.ReplaceAllString(s, "<dur>")
+	if last == 0 {
+		return line
+	}
+	b.WriteString(line[last:])
+	return b.String()
 }
 
 func lastTimestamp(line string) (string, bool) {
