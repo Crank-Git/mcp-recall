@@ -341,3 +341,20 @@ func TestNoWriterChangesIndexedColumn(t *testing.T) {
 		t.Fatal("found no UPDATE stored_outputs statements; the scan is broken")
 	}
 }
+
+// A new store must get incremental auto-vacuum: set after the WAL switch it
+// silently stays NONE, and no reclaim ever shrinks the file.
+func TestOpenNewStoreUsesIncrementalAutoVacuum(t *testing.T) {
+	database, err := Open(filepath.Join(t.TempDir(), "new.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	var mode int
+	if err := database.QueryRow("PRAGMA auto_vacuum").Scan(&mode); err != nil {
+		t.Fatal(err)
+	}
+	if mode != 2 {
+		t.Fatalf("auto_vacuum = %d, want 2 (INCREMENTAL)", mode)
+	}
+}

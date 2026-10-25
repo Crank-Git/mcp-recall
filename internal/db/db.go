@@ -155,11 +155,14 @@ func Open(path string) (*sql.DB, error) {
 	}
 	database.SetMaxOpenConns(1)
 
+	// auto_vacuum first: switching to WAL writes the file header, after which
+	// a new store's auto_vacuum can no longer change, and ReclaimPages' and the
+	// FTS migration's incremental_vacuum would free nothing.
 	pragmas := []string{
+		"PRAGMA auto_vacuum=INCREMENTAL",
 		"PRAGMA journal_mode=WAL",
 		"PRAGMA foreign_keys=ON",
 		"PRAGMA busy_timeout=5000",
-		"PRAGMA auto_vacuum=INCREMENTAL",
 	}
 	for _, p := range pragmas {
 		if _, err := database.Exec(p); err != nil {
