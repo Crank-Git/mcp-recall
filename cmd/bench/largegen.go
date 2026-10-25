@@ -26,23 +26,23 @@ func generatedFixtures() []Fixture {
 		return o
 	}
 	return []Fixture{
-		{"large", "github issues ×300", "mcp__github__list_issues", nil, genGithubIssues(300)},
-		{"large", "jira search ×250", "mcp__jira__search_issues", nil, genJiraIssues(250)},
-		{"large", "stripe events ×400", "mcp__stripe__list_events", nil, genStripeEvents(400)},
-		{"large", "postgres rows ×1500", "mcp__postgres__query", nil, genPostgresRows(1500)},
-		{"large", "playwright DOM (big)", "mcp__playwright__browser_snapshot", nil, genPlaywright(450)},
-		{"large", "server log ×3000", "mcp__unknown__fetch_logs", nil, genServerLog(3000)},
-		{"large", "read_file (big source)", "mcp__filesystem__read_file", nil, genReadFile(2600)},
-		{"cli", "Bash: git status ×500", "Bash", bashInput("git status"), genGitStatus(500)},
-		{"cli", "Bash: go test ×1200", "Bash", bashInput("go test ./..."), genTestRunner(1200)},
-		{"cli", "Bash: docker ps ×120", "Bash", bashInput("docker ps -a"), genDockerPs(120)},
+		{"large", "github issues ×300", "mcp__github__list_issues", nil, genGithubIssues(300), nil},
+		{"large", "jira search ×250", "mcp__jira__search_issues", nil, genJiraIssues(250), nil},
+		{"large", "stripe events ×400", "mcp__stripe__list_events", nil, genStripeEvents(400), nil},
+		{"large", "postgres rows ×1500", "mcp__postgres__query", nil, genPostgresRows(1500), nil},
+		{"large", "playwright DOM (big)", "mcp__playwright__browser_snapshot", nil, genPlaywright(450), nil},
+		{"large", "server log ×3000", "mcp__unknown__fetch_logs", nil, genServerLog(3000), nil},
+		{"large", "read_file (big source)", "mcp__filesystem__read_file", nil, genReadFile(2600), nil},
+		{"cli", "Bash: git status ×500", "Bash", bashInput("git status"), genGitStatus(500), nil},
+		{"cli", "Bash: go test ×1200", "Bash", bashInput("go test ./..."), genTestRunner(1200), nil},
+		{"cli", "Bash: docker ps ×120", "Bash", bashInput("docker ps -a"), genDockerPs(120), nil},
 		// Upstream's command-aware Bash fixtures (scripts/benchmark.ts, #249).
-		{"cli", "Bash: tsc --noEmit (60 errors)", "Bash", bashInput("tsc --noEmit"), genTscErrors()},
-		{"cli", "Bash: cargo build (failure)", "Bash", bashInput("cargo build"), genCargoBuild()},
-		{"cli", "Bash: git --no-pager diff ×18", "Bash", bashInput("git --no-pager diff"), genGitDiff()},
-		{"cli", "Bash: rg ×240 (6 files)", "Bash", bashInput("rg --no-heading doThing"), genRgMatches()},
-		{"cli", "Bash: ls -R (deep tree)", "Bash", bashInput("ls -R"), genLsR()},
-		{"cli", "Bash: find ×400", "Bash", bashInput("find . -name '*.ts'"), genFindPaths()},
+		{"cli", "Bash: tsc --noEmit (60 errors)", "Bash", bashInput("tsc --noEmit"), genTscErrors(), []string{"60 errors", `file59\.ts`}},
+		{"cli", "Bash: cargo build (failure)", "Bash", bashInput("cargo build"), genCargoBuild(), nil},
+		{"cli", "Bash: git --no-pager diff ×18", "Bash", bashInput("git --no-pager diff"), genGitDiff(), []string{`f17\.ts`, `\+new 6`}},
+		{"cli", "Bash: rg ×240 (6 files)", "Bash", bashInput("rg --no-heading doThing"), genRgMatches(), []string{"240 matches", "mod5/"}},
+		{"cli", "Bash: ls -R (deep tree)", "Bash", bashInput("ls -R"), genLsR(), nil},
+		{"cli", "Bash: find ×400", "Bash", bashInput("find . -name '*.ts'"), genFindPaths(), []string{"400", `file399\.ts`}},
 	}
 }
 

@@ -7,6 +7,8 @@
 
 package main
 
+import "fmt"
+
 // Result is the outcome of compressing one corpus fixture.
 type Result struct {
 	Category      string
@@ -23,6 +25,18 @@ type Result struct {
 	Expanded      bool  // summary was >= input (no compression win)
 	LatencyNS     int64 // handler runtime per call (ns/op, median of a timed loop)
 	Note          string
+	// FactsKept of FactsListed: the fixture's Keep facts still in the summary.
+	FactsKept   int
+	FactsListed int
+}
+
+// FactsCell is "kept/listed" for a fixture's Keep facts, or "—" when it lists
+// none.
+func (r Result) FactsCell() string {
+	if r.FactsListed == 0 {
+		return "—"
+	}
+	return fmt.Sprintf("%d/%d", r.FactsKept, r.FactsListed)
 }
 
 // isEdge reports whether a fixture is an edge/robustness case (excluded from the

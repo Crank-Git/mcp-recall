@@ -72,9 +72,9 @@ func RenderReport(s Summary) {
 	fmt.Printf("%s%s  mcp-recall compression benchmark %s\n", cBold, cCyan, cReset)
 	fmt.Printf("%s  corpus: %d fixtures · tokens: %s%s\n\n", cDim, len(s.Results), s.TokenizerName, cReset)
 
-	fmt.Printf("%s  %-11s %-22s %10s %10s  %-16s %8s   %s%s\n",
-		cBold, "CATEGORY", "FIXTURE", "IN", "OUT", "REDUCTION", "TOK SAVE", "STATUS", cReset)
-	fmt.Printf("%s  %s%s\n", cGray, strings.Repeat("─", 96), cReset)
+	fmt.Printf("%s  %-11s %-22s %10s %10s  %-16s %8s  %5s   %s%s\n",
+		cBold, "CATEGORY", "FIXTURE", "IN", "OUT", "REDUCTION", "TOK SAVE", "FACTS", "STATUS", cReset)
+	fmt.Printf("%s  %s%s\n", cGray, strings.Repeat("─", 103), cReset)
 
 	for _, r := range s.Results {
 		red := r.ReductionPct()
@@ -82,18 +82,20 @@ func RenderReport(s Summary) {
 		if r.SecretBlocked || !r.Stored {
 			redStr = fmt.Sprintf("%s%5s %s", cDim, "—", cReset)
 		}
-		fmt.Printf("  %s%-11s%s %-22s %10s %10s  %s %s %+8s   %s\n",
+		fmt.Printf("  %s%-11s%s %-22s %10s %10s  %s %s %+8s  %5s   %s\n",
 			cDim, r.Category, cReset,
 			truncate(r.Name, 22),
 			format.Bytes(r.InputBytes),
 			format.Bytes(r.OutputBytes),
 			bar(red, 10), redStr,
 			savedStr(r),
+			r.FactsCell(),
 			statusCell(r),
 		)
 	}
 
-	fmt.Printf("%s  %s%s\n", cGray, strings.Repeat("─", 96), cReset)
+	fmt.Printf("%s  %s%s\n", cGray, strings.Repeat("─", 103), cReset)
+	fmt.Printf("%s  FACTS: the fixture's listed facts still in the summary (— when it lists none).%s\n", cDim, cReset)
 	renderFooter(s)
 }
 

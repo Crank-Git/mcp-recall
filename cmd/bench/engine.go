@@ -10,6 +10,7 @@
 package main
 
 import (
+	"regexp"
 	"time"
 
 	"mcprecall/internal/db"
@@ -26,6 +27,9 @@ type Fixture struct {
 	Tool     string
 	Input    any // optional tool_input (mostly nil)
 	Content  string
+	// Keep lists facts (regexes) a summary must still carry for Claude, as in
+	// upstream's scripts/benchmark.ts; nil when the fixture lists none.
+	Keep []string
 }
 
 var registered bool
@@ -65,6 +69,12 @@ func runOne(f Fixture, tok Tokenizer) Result {
 		SecretBlocked: len(secretsFound) > 0,
 		Expanded:      len(res.Summary) >= res.OriginalSize,
 		LatencyNS:     latency,
+		FactsListed:   len(f.Keep),
+	}
+	for _, re := range f.Keep {
+		if regexp.MustCompile(re).MatchString(res.Summary) {
+			r.FactsKept++
+		}
 	}
 
 	// Mirror the hook: store only when compression is meaningful and no secret

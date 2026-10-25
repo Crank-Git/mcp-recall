@@ -126,7 +126,7 @@ func (m model) View() string {
 	b.WriteString(stTitle.Render("mcp-recall compression benchmark") + "\n")
 	b.WriteString(stDim.Render(fmt.Sprintf(" corpus: %d fixtures · tokens: %s", len(m.fixtures), m.tok.Name())) + "\n\n")
 
-	b.WriteString(stHeader.Render(fmt.Sprintf(" %-11s %-20s %9s %9s  %-12s %8s  %s", "CATEGORY", "FIXTURE", "IN", "OUT", "REDUCTION", "TOK", "")) + "\n")
+	b.WriteString(stHeader.Render(fmt.Sprintf(" %-11s %-20s %9s %9s  %-12s %8s  %5s  %s", "CATEGORY", "FIXTURE", "IN", "OUT", "REDUCTION", "TOK", "FACTS", "")) + "\n")
 	b.WriteString(stGray.Render(" "+strings.Repeat("─", 88)) + "\n")
 
 	for _, r := range m.results {
@@ -165,13 +165,13 @@ func renderRow(r Result) string {
 			status = stRed.Render("✗ FAIL")
 		}
 	}
-	return fmt.Sprintf(" %s %-20s %9s %9s  %s %s %8s  %s",
+	return fmt.Sprintf(" %s %-20s %9s %9s  %s %s %8s  %5s  %s",
 		stDim.Render(fmt.Sprintf("%-11s", r.Category)),
 		truncate(r.Name, 20),
 		format.Bytes(r.InputBytes),
 		format.Bytes(r.OutputBytes),
 		tuiBar(red, 10), redCell,
-		tokCell, status,
+		tokCell, r.FactsCell(), status,
 	)
 }
 

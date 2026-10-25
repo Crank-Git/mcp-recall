@@ -179,3 +179,22 @@ func TestDeterministic(t *testing.T) {
 		t.Errorf("non-deterministic: %+v vs %+v", a, b)
 	}
 }
+
+// Facts kept (upstream scripts/benchmark.ts): fixtures that list facts report
+// how many survive in the summary; the rest show "—".
+func TestFactsKept(t *testing.T) {
+	results := runCorpus(t)
+	for name, want := range map[string]string{
+		"Bash: git --no-pager diff ×18": "2/2",
+		"Bash: rg ×240 (6 files)":       "2/2",
+		"Bash: git status ×500":         "—",
+	} {
+		r, ok := byName(results, name)
+		if !ok {
+			t.Fatalf("fixture %q missing", name)
+		}
+		if got := r.FactsCell(); got != want {
+			t.Errorf("%q facts = %s, want %s", name, got, want)
+		}
+	}
+}
