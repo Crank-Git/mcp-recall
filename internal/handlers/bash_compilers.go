@@ -47,6 +47,9 @@ var (
 	fileLocRe = regexp.MustCompile(`^(\S*\.\w+):(\d+)(?::(\d+))?:\s+(?:(error|warning|note):\s+)?(.+)$`)
 	// rustc / cargo bare severity: "error[E0308]: message" / "warning: message"
 	severityRe = regexp.MustCompile(`^(error|warning)(?:\[[A-Za-z]?\d+\])?:\s+(.+)$`)
+	// ruff's default (full) format: "F401 [*] os imported but unused", its
+	// location on the "  --> path:line:col" line that follows, as cargo does.
+	ruffCodeRe = regexp.MustCompile(`^[A-Z]{1,4}\d{3,4} \S.*$`)
 	// cargo location line following a bare-severity line: "  --> src/main.rs:10:5"
 	cargoLocRe = regexp.MustCompile(`^\s*-->\s+(\S+:\d+(?::\d+)?)`)
 	// eslint stylish file header (a bare path on its own line)
@@ -148,7 +151,15 @@ func compilerDiagnosticsHandler(toolName string, output any) Result {
 			})
 			continue
 		}
-		// --- cargo "  --> loc" attaches to the previous locationless diagnostic ---
+		// --- ruff full format: a rule code opens a diagnostic; its --> line follows ---
+		// Unlabeled: the shape is generic enough that another tool can print it,
+		// so on a clean exit it is dropped like a go-style line rather than
+		// shown as an error (upstream #397).
+		if ruffCodeRe.MatchString(t) {
+			diagnostics = append(diagnostics, diagnostic{severity: "error", message: clipDiagnostic(t)})
+			continue
+		}
+		// --- cargo / ruff "  --> loc" attaches to the previous locationless diagnostic ---
 		if m := cargoLocRe.FindStringSubmatch(t); m != nil {
 			if n := len(diagnostics); n > 0 && diagnostics[n-1].location == "" {
 				diagnostics[n-1].location = m[1]

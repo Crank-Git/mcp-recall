@@ -34,15 +34,14 @@ func TestGenericTruncation(t *testing.T) {
 	}
 }
 
-func TestJSONHandlerDepthAndArrayCap(t *testing.T) {
-	// v1.9.0: compact output. Depth-truncated value at depth>3 is "…".
-	r := jsonHandler("x", `{"a":{"b":{"c":{"d":1}}}}`)
-	if r.Summary != `{"a":{"b":{"c":{"d":"…"}}}}` {
-		t.Errorf("depth truncation = %q", r.Summary)
+func TestJSONHandlerKeepsSmallDocumentWhole(t *testing.T) {
+	// Upstream #403: no fixed depth or array cap; a document within the budget
+	// passes through as compact JSON.
+	if r := jsonHandler("x", `{"a":{"b":{"c":{"d":1}}}}`); r.Summary != `{"a":{"b":{"c":{"d":1}}}}` {
+		t.Errorf("deep = %q", r.Summary)
 	}
-	r2 := jsonHandler("x", `[1,2,3,4,5]`)
-	if r2.Summary != `[1,2,3,"…2 more"]` {
-		t.Errorf("array cap = %q", r2.Summary)
+	if r := jsonHandler("x", `[1, 2, 3, 4, 5]`); r.Summary != `[1,2,3,4,5]` {
+		t.Errorf("array = %q", r.Summary)
 	}
 }
 

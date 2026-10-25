@@ -109,3 +109,35 @@ func TestExtractStderrFromJSONString(t *testing.T) {
 		t.Error("exit code should be absent for unstructured output")
 	}
 }
+
+func TestCompilerRuffFullFormat(t *testing.T) {
+	out := strings.Join([]string{
+		"F401 [*] `os` imported but unused",
+		" --> svc/mod0.py:1:8",
+		"  |",
+		"1 | import os",
+		"  |        ^^",
+		"help: Remove unused import: `os`",
+		"",
+		"F821 Undefined name `fallback_0`",
+		" --> svc/mod0.py:6:55",
+		"  |",
+		"6 |     return json.loads(open(path).read()) if path else fallback_0",
+		"  |                                                       ^^^^^^^^^^",
+		"",
+		"Found 2 errors.",
+		"[*] 1 fixable with the `--fix` option.",
+	}, "\n")
+	s := compilerDiagnosticsHandler("Bash", bashOut(t, out, "", 1)).Summary
+	has(t, s, "2 errors")
+	has(t, s, "svc/mod0.py:1:8 — F401 [*] `os` imported but unused")
+	has(t, s, "svc/mod0.py:6:55 — F821 Undefined name `fallback_0`")
+	hasNot(t, s, "help:")
+	hasNot(t, s, "^^")
+}
+
+func TestCompilerRuffShapedLineOnPassingRun(t *testing.T) {
+	s := compilerDiagnosticsHandler("Bash", bashOut(t, "D100 checks are advisory in this project\nBuild finished.", "", 0)).Summary
+	hasNot(t, s, "D100")
+	hasNot(t, s, "error")
+}

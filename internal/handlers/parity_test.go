@@ -130,16 +130,6 @@ func TestParityFilesystem(t *testing.T) {
 // ── json + generic ────────────────────────────────────────────────────────────
 
 func TestParityJSON(t *testing.T) {
-	// depth truncation: a.b.c.d == "…"
-	depth := sumS(jsonHandler, "x", `{"a":{"b":{"c":{"d":"deep"}}}}`)
-	pv, _ := jsonx.ParseString(depth)
-	a, _ := pv.(*jsonx.Obj).Get("a")
-	b, _ := a.(*jsonx.Obj).Get("b")
-	c, _ := b.(*jsonx.Obj).Get("c")
-	d, _ := c.(*jsonx.Obj).Get("d")
-	if d != "…" {
-		t.Errorf("depth: a.b.c.d = %v", d)
-	}
 	// v1.9.0: compact (no pretty-print indentation), keys verbatim.
 	compact := sumS(jsonHandler, "x", `{"a":{"b":{"c":1}},"items":[1,2,3,4,5]}`)
 	hasNot(t, compact, "\n  ")
@@ -147,9 +137,6 @@ func TestParityJSON(t *testing.T) {
 	if _, err := jsonx.ParseString(compact); err != nil {
 		t.Errorf("compact summary not valid JSON: %q", compact)
 	}
-	// array cap: 3 items + "…2 more"
-	arrOut := sumS(jsonHandler, "x", `{"items":[1,2,3,4,5]}`)
-	has(t, arrOut, "2 more")
 	// short array unchanged
 	short := sumS(jsonHandler, "x", `{"items":[1,2]}`)
 	has(t, short, "[1,2]")
