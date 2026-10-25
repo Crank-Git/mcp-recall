@@ -52,7 +52,7 @@ func parseGitDiff(text string) []fileDiff {
 
 func gitDiffHandler(toolName string, output any) Result {
 	stdout := extractStdout(output)
-	originalSize := byteLen(ExtractText(output))
+	originalSize := byteLen(BashOutputText(output))
 
 	if strings.TrimSpace(stdout) == "" {
 		return Result{Summary: "[git diff — no changes]", OriginalSize: originalSize}
@@ -91,7 +91,7 @@ var gitLogOnelineRe = regexp.MustCompile(`^[0-9a-f]{6,40}\s`)
 
 func gitLogHandler(_ string, output any) Result {
 	stdout := extractStdout(output)
-	originalSize := byteLen(ExtractText(output))
+	originalSize := byteLen(BashOutputText(output))
 
 	trimmed := strings.TrimSpace(stdout)
 	var lines []string
@@ -188,7 +188,7 @@ var (
 
 func gitStatusHandler(toolName string, output any) Result {
 	stdout := extractStdout(output)
-	originalSize := byteLen(ExtractText(output))
+	originalSize := byteLen(BashOutputText(output))
 
 	if strings.TrimSpace(stdout) == "" {
 		return Result{Summary: "[git status — clean working tree]", OriginalSize: originalSize}
@@ -303,7 +303,7 @@ var (
 
 func gitRefsHandler(toolName string, output any) Result {
 	stdout := extractStdout(output)
-	originalSize := byteLen(ExtractText(output))
+	originalSize := byteLen(BashOutputText(output))
 	var lines []string
 	for _, l := range strings.Split(stdout, "\n") {
 		if strings.TrimSpace(l) != "" {

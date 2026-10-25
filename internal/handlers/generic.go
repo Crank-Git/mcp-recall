@@ -47,9 +47,16 @@ func genericPlural(n int) string {
 }
 
 func summarizeLines(lines []string) string {
-	head := lines[:genericHeadLines]
-	tail := lines[len(lines)-genericTailLines:]
-	middle := lines[genericHeadLines : len(lines)-genericTailLines]
+	return summarizeLineWindow(lines, genericHeadLines, genericTailLines)
+}
+
+// summarizeLineWindow keeps the first headLines and last tailLines lines, with a
+// count of the elided middle and any error/warn lines surfaced from it. Callers
+// keep len(lines) > headLines+tailLines so the windows never overlap.
+func summarizeLineWindow(lines []string, headLines, tailLines int) string {
+	head := lines[:headLines]
+	tail := lines[len(lines)-tailLines:]
+	middle := lines[headLines : len(lines)-tailLines]
 	var matches []string
 	for _, l := range middle {
 		if genericMatchRe.MatchString(l) {
@@ -80,6 +87,12 @@ func summarizeLines(lines []string) string {
 // long multi-line output keeps head+tail lines and surfaces error/warn lines
 // from the elided middle; long single-block output keeps a head+tail window.
 func genericHandler(_ string, output any) Result {
+	return GenericHandler("", output)
+}
+
+// GenericHandler is genericHandler, exported for the hook's empty-summary
+// fallback (upstream #296).
+func GenericHandler(_ string, output any) Result {
 	raw := ExtractText(output)
 	originalSize := byteLen(raw)
 

@@ -25,7 +25,7 @@ func findFirst(parts []string, pred func(string) bool) string {
 
 func dockerPsHandler(toolName string, output any) Result {
 	stdout := extractStdout(output)
-	originalSize := byteLen(ExtractText(output))
+	originalSize := byteLen(BashOutputText(output))
 
 	var lines []string
 	for _, l := range strings.Split(strings.TrimSpace(stdout), "\n") {

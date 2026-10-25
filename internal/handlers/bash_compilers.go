@@ -78,7 +78,7 @@ func compilerDiagnosticsHandler(toolName string, output any) Result {
 	stdout := extractStdout(output)
 	stderr := extractStderr(output)
 	combined := stdout + "\n" + stderr
-	originalSize := byteLen(ExtractText(output))
+	originalSize := byteLen(BashOutputText(output))
 	exitCode, hasExit := extractExitCode(output)
 
 	var diagnostics []diagnostic

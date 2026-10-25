@@ -104,7 +104,9 @@ func itoa(n int) string {
 	return string(b)
 }
 
-func isEmpty(o HookOutput) bool { return o.UpdatedMCPToolOutput == "" && !o.SuppressOutput }
+func isEmpty(o HookOutput) bool {
+	return o.UpdatedMCPToolOutput == "" && !o.SuppressOutput && o.HookSpecificOutput == nil
+}
 
 // ── handleSessionStart ────────────────────────────────────────────────────────
 

@@ -25,6 +25,17 @@ func runeLen(s string) int { return len([]rune(s)) }
 func trimEnd(s string) string {
 	return strings.TrimRightFunc(s, unicode.IsSpace)
 }
+
+// excerpt returns raw unchanged when it fits, so the hook's size check passes
+// it through; trimming it would turn a complete answer into a 1-byte
+// "summary". Otherwise the first maxChars runes, trimmed, then "\n…".
+func excerpt(raw string, maxChars int) string {
+	if runeLen(raw) <= maxChars {
+		return raw
+	}
+	return trimEnd(firstChars(raw, maxChars)) + "\n…"
+}
+
 func deref(p *int, def int) int {
 	if p != nil {
 		return *p
@@ -107,17 +118,17 @@ func resolveItems(parsed any, itemsPaths []string) ([]any, bool) {
 }
 
 func applyJSONExtract(s Strategy, output any) handlers.Result {
-	raw := handlers.ExtractText(output)
+	raw := handlers.ProfileText(output)
 	originalSize := len(raw)
 	fallbackChars := deref(s.FallbackChars, 500)
 
 	parsed, err := jsonx.ParseString(raw)
 	if err != nil {
-		return handlers.Result{Summary: firstChars(raw, fallbackChars), OriginalSize: originalSize}
+		return handlers.Result{Summary: excerpt(raw, fallbackChars), OriginalSize: originalSize}
 	}
 	items, ok := resolveItems(parsed, s.ItemsPath)
 	if !ok || len(items) == 0 {
-		return handlers.Result{Summary: firstChars(raw, fallbackChars), OriginalSize: originalSize}
+		return handlers.Result{Summary: excerpt(raw, fallbackChars), OriginalSize: originalSize}
 	}
 
 	maxItems := deref(s.MaxItems, 10)
@@ -128,16 +139,26 @@ func applyJSONExtract(s Strategy, output any) handlers.Result {
 	if n > maxItems {
 		n = maxItems
 	}
-	var lines []string
+	extracted := make([][]string, n)
+	matched := false
 	for i, item := range items[:n] {
-		var parts []string
 		for _, f := range s.Fields {
 			val := fieldValue(item, f, maxCharsPerField)
 			if val != "" {
-				parts = append(parts, getLabel(f, s.Labels)+": "+val)
+				extracted[i] = append(extracted[i], getLabel(f, s.Labels)+": "+val)
+				matched = true
 			}
 		}
-		lines = append(lines, fmt.Sprintf("%d. %s", i+1, strings.Join(parts, " · ")))
+	}
+	// No configured field matched anything: the profile does not fit this
+	// output (a guessed `learn` profile, or an API that changed shape). An
+	// excerpt beats "1. " lines that tell Claude nothing (upstream #299).
+	if !matched {
+		return handlers.Result{Summary: excerpt(raw, fallbackChars), OriginalSize: originalSize}
+	}
+	lines := make([]string, n)
+	for i, parts := range extracted {
+		lines[i] = fmt.Sprintf("%d. %s", i+1, strings.Join(parts, " · "))
 	}
 	more := ""
 	if count > maxItems {
@@ -184,7 +205,7 @@ func truncateJSON(value any, depth, maxDepth, maxArrayItems int) any {
 }
 
 func applyJSONTruncate(s Strategy, output any) handlers.Result {
-	raw := handlers.ExtractText(output)
+	raw := handlers.ProfileText(output)
 	originalSize := len(raw)
 	fallbackChars := deref(s.FallbackChars, 500)
 	maxDepth := deref(s.MaxDepth, 3)
@@ -192,11 +213,7 @@ func applyJSONTruncate(s Strategy, output any) handlers.Result {
 
 	parsed, err := jsonx.ParseString(raw)
 	if err != nil {
-		excerpt := trimEnd(firstChars(raw, fallbackChars))
-		if runeLen(excerpt) < runeLen(raw) {
-			return handlers.Result{Summary: excerpt + "\n…", OriginalSize: originalSize}
-		}
-		return handlers.Result{Summary: excerpt, OriginalSize: originalSize}
+		return handlers.Result{Summary: excerpt(raw, fallbackChars), OriginalSize: originalSize}
 	}
 	return handlers.Result{Summary: jsonx.Indent(truncateJSON(parsed, 0, maxDepth, maxArrayItems)), OriginalSize: originalSize}
 }
@@ -204,14 +221,8 @@ func applyJSONTruncate(s Strategy, output any) handlers.Result {
 // ── text_truncate ─────────────────────────────────────────────────────────────
 
 func applyTextTruncate(s Strategy, output any) handlers.Result {
-	raw := handlers.ExtractText(output)
-	originalSize := len(raw)
-	maxChars := deref(s.MaxChars, 500)
-	excerpt := trimEnd(firstChars(raw, maxChars))
-	if runeLen(raw) > maxChars {
-		return handlers.Result{Summary: excerpt + "\n…", OriginalSize: originalSize}
-	}
-	return handlers.Result{Summary: excerpt, OriginalSize: originalSize}
+	raw := handlers.ProfileText(output)
+	return handlers.Result{Summary: excerpt(raw, deref(s.MaxChars, 500)), OriginalSize: len(raw)}
 }
 
 func apply(s Strategy, output any) handlers.Result {

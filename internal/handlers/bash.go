@@ -25,7 +25,7 @@ var (
 
 func terraformPlanHandler(toolName string, output any) Result {
 	stdout := extractStdout(output)
-	originalSize := byteLen(ExtractText(output))
+	originalSize := byteLen(BashOutputText(output))
 
 	summaryLine := terraformPlanSummaryRe.FindString(stdout)
 
@@ -74,7 +74,7 @@ func packageInstallHandler(toolName string, output any) Result {
 	stdout := extractStdout(output)
 	stderr := extractStderr(output)
 	combined := strings.TrimSpace(stdout + "\n" + stderr)
-	originalSize := byteLen(ExtractText(output))
+	originalSize := byteLen(BashOutputText(output))
 
 	var warnings, errors []string
 	for _, line := range strings.Split(combined, "\n") {
@@ -164,7 +164,7 @@ func buildToolHandler(toolName string, output any) Result {
 	stdout := extractStdout(output)
 	stderr := extractStderr(output)
 	combined := strings.TrimSpace(stdout + "\n" + stderr)
-	originalSize := byteLen(ExtractText(output))
+	originalSize := byteLen(BashOutputText(output))
 
 	var errorLines, targetLines []string
 	for _, line := range strings.Split(combined, "\n") {
@@ -241,7 +241,7 @@ var (
 
 func ghHandler(toolName string, output any) Result {
 	stdout := extractStdout(output)
-	originalSize := byteLen(ExtractText(output))
+	originalSize := byteLen(BashOutputText(output))
 
 	var lines []string
 	for _, l := range strings.Split(strings.TrimSpace(stdout), "\n") {
@@ -382,21 +382,54 @@ var (
 	gitGlobalOpts = regexp.MustCompile(`^git\s+(?:(?:--no-pager|--paginate|-P)\s+|-[cC]\s+\S+\s+)+`)
 )
 
+// assignPat is a `VAR=value` assignment. The value alternatives are disjoint (a
+// quoted span, or a run with no whitespace or quote), as in cdPrefixRe.
+const assignPat = `[A-Za-z_]\w*=(?:"[^"]*"|'[^']*'|[^\s"']*)`
+
+// wrapperPrefixes are leading wrappers that run another command unchanged
+// (upstream #302). Each is stripped only in a shape whose argument span is
+// unambiguous. Upstream ends each with a lookahead for the start of a command
+// word; RE2 has none, so each pattern consumes that one ASCII character
+// ([A-Za-z_./~]) and the caller keeps it. A flag, operator or end-of-string
+// there means the wrapper is not wrapping anything parseable (`env | grep`,
+// `sudo -u www …`, `timeout 30`), so it is left in place.
+var wrapperPrefixes = []*regexp.Regexp{
+	regexp.MustCompile(`^timeout\s+(?:(?:-[sk]\s+\S+|--[a-z-]+(?:=\S+)?|-v)\s+)*\d+(?:\.\d+)?[smhd]?\s+[A-Za-z_./~]`),
+	regexp.MustCompile(`^time(?:\s+-p)?\s+[A-Za-z_./~]`),
+	regexp.MustCompile(`^nice(?:\s+(?:-n\s*-?\d+|--adjustment=-?\d+|-\d+))?\s+[A-Za-z_./~]`),
+	regexp.MustCompile(`^env(?:\s+-i)?(?:\s+` + assignPat + `)*\s+[A-Za-z_./~]`),
+	regexp.MustCompile(`^(?:` + assignPat + `\s+)+[A-Za-z_./~]`),
+	regexp.MustCompile(`^(?:sudo|doas)\s+[A-Za-z_./~]`),
+}
+
 // NormalizeCommand normalises a Bash command so routing sees the real
 // subcommand: it unwraps leading `cd <dir>` prefixes (see cdPrefixRe for the
 // separator and quoting shapes) and strips git global options (--no-pager,
 // -C <path>, -c <k=v>, --paginate, -P) that would otherwise push `git diff`
-// output to the generic shell fallback. Chained prefixes across mixed
-// separators (`cd /a && cd /b\ngit diff`) are unwrapped up to 4 hops, as
-// upstream bounds it.
+// output to the generic shell fallback. It also strips leading wrappers that
+// run the real command unchanged (`timeout 30`, `time`, `nice -n 10`, `env
+// A=1`, `A=1`, `sudo`; see wrapperPrefixes), so routing, the fingerprint and
+// retention all see the wrapped command (upstream #302). Chained prefixes
+// across mixed separators and wrappers (`cd /a && timeout 60 git diff`) are
+// unwrapped up to 8 hops, as upstream bounds it.
 func NormalizeCommand(command string) string {
 	c := strings.TrimSpace(command)
-	for i := 0; i < 4; i++ {
-		m := cdPrefixRe.FindStringSubmatch(c)
-		if m == nil {
+	for i := 0; i < 8; i++ {
+		if m := cdPrefixRe.FindStringSubmatch(c); m != nil {
+			c = strings.TrimSpace(m[1])
+			continue
+		}
+		stripped := false
+		for _, re := range wrapperPrefixes {
+			if loc := re.FindStringIndex(c); loc != nil {
+				c = c[loc[1]-1:] // keep the command word's first character
+				stripped = true
+				break
+			}
+		}
+		if !stripped {
 			break
 		}
-		c = strings.TrimSpace(m[1])
 	}
 	return gitGlobalOpts.ReplaceAllString(c, "git ")
 }
@@ -458,6 +491,79 @@ func CommandFingerprint(command string) string {
 	return verb + " " + second[1]
 }
 
+// IsCompoundCommand reports whether command runs more than one command in
+// sequence: a `;`, `&&`, `||` or newline outside quotes, escapes and `( … )` /
+// `$( … )`, with a command after it. A pipe is not a separator: it yields one
+// output stream. Every operator is ASCII, so the scan is byte-wise.
+func IsCompoundCommand(command string) bool {
+	var quote byte
+	depth := 0
+	for i := 0; i < len(command); i++ {
+		ch := command[i]
+		if quote == '\'' {
+			if ch == '\'' {
+				quote = 0
+			}
+			continue
+		}
+		if ch == '\\' {
+			i++
+			continue
+		}
+		if quote != 0 {
+			if ch == quote {
+				quote = 0
+			}
+			continue
+		}
+		switch {
+		case ch == '\'' || ch == '"' || ch == '`':
+			quote = ch
+		case ch == '(':
+			depth++
+		case ch == ')':
+			if depth > 0 {
+				depth--
+			}
+		case depth == 0:
+			width := 0
+			if strings.HasPrefix(command[i:], "&&") || strings.HasPrefix(command[i:], "||") {
+				width = 2
+			} else if ch == ';' || ch == '\n' {
+				width = 1
+			}
+			if width > 0 && strings.TrimSpace(command[i+width:]) != "" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// Compound-command windows: wide enough that a typical multi-command
+// diagnostic (a few short sections) passes through whole, since every section
+// is a separate answer and any one may be the one needed.
+const (
+	compoundHeadLines = 30
+	compoundTailLines = 15
+)
+
+// compoundHandler summarises several commands' output (upstream #308): no
+// single command's handler fits, and an `ls` handler on `ls …; git diff | wc
+// -c` dropped the second result. Short output is returned whole (the hook then
+// passes it through unstored); long output keeps head, tail and the error
+// lines between.
+func compoundHandler(_ string, output any) Result {
+	text := BashOutputText(output)
+	originalSize := byteLen(text)
+	lines := strings.Split(text, "\n")
+	if len(lines) <= compoundHeadLines+compoundTailLines {
+		return Result{Summary: text, OriginalSize: originalSize}
+	}
+	window := summarizeLineWindow(lines, compoundHeadLines, compoundTailLines)
+	return Result{Summary: fmt.Sprintf("[bash · compound command · %d lines]\n%s", len(lines), window), OriginalSize: originalSize}
+}
+
 // GetBashHandler returns the handler for a native Bash tool call based on the
 // command string in tool_input. Falls back to the shell handler.
 func GetBashHandler(input any) Handler {
@@ -466,6 +572,9 @@ func GetBashHandler(input any) Handler {
 		return shellHandler
 	}
 	command := NormalizeCommand(rawCommand)
+	if IsCompoundCommand(command) {
+		return compoundHandler
+	}
 	switch {
 	case cmdGitGrep.MatchString(command):
 		return grepHandler

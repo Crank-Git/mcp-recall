@@ -206,3 +206,19 @@ func contentBlockHandler(_ string, output any) Result {
 	}
 	return Result{Summary: note, OriginalSize: originalSize}
 }
+
+// ProfileText is the text a compression profile works on. ExtractText keeps a
+// text-only top-level block array as JSON (for jsonHandler routing), so a
+// profile would parse the blocks themselves and find none of its fields.
+// Context7 and Sentry send that shape: unwrap it so a JSON body parses and
+// markdown takes the fallback path (upstream #299).
+func ProfileText(output any) string {
+	if blocks := asContentBlocks(output); blocks != nil {
+		for _, b := range blocks {
+			if b.typ == "text" {
+				return joinTextBlocks(blocks)
+			}
+		}
+	}
+	return ExtractText(output)
+}

@@ -109,9 +109,10 @@ func startsWithBraceOrBracket(s string) bool {
 // structured {stdout, stderr, returncode} JSON as well as plain string output.
 func shellHandler(toolName string, output any) Result {
 	raw := ExtractText(output)
+	structured := parseStructured(raw)
 	originalSize := byteLen(raw)
 
-	if structured := parseStructured(raw); structured != nil {
+	if structured != nil {
 		// stdout ?? output ?? "" — non-null stdout wins, else non-null output.
 		var soStr string
 		if v, ok := structured.Get("stdout"); ok && v != nil {
@@ -119,8 +120,10 @@ func shellHandler(toolName string, output any) Result {
 		} else if v, ok := structured.Get("output"); ok && v != nil {
 			soStr, _ = v.(string)
 		}
-		stdout := stripSshNoise(stripAnsi(soStr))
 		stderrStr, _ := objStr(structured, "stderr")
+		// Size the output itself, not the JSON envelope around it (upstream #306).
+		originalSize = byteLen(joinNonEmpty(soStr, stderrStr))
+		stdout := stripSshNoise(stripAnsi(soStr))
 		stderr := stripSshNoise(stripAnsi(stderrStr))
 
 		var exitStr string

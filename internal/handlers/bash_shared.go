@@ -96,3 +96,45 @@ func extractCommand(input any) string {
 	}
 	return ""
 }
+
+// BashOutputText returns the text a native Bash response actually carries —
+// stdout, then stderr — without the {stdout, stderr, interrupted, isImage,
+// noOutputExpected} envelope. Accepts the object and the JSON-string shape.
+// This is what the hook stores, hints and searches, and what Bash originalSize
+// measures; the envelope's field names and escaped newlines are not output
+// (upstream #306). Falls back to ExtractText for anything not Bash-shaped.
+func BashOutputText(output any) string {
+	read := func(v any) (string, bool) {
+		obj, ok := v.(*jsonx.Obj)
+		if !ok {
+			return "", false
+		}
+		stdout, ok := objStr(obj, "stdout")
+		if !ok {
+			return "", false
+		}
+		stderr, _ := objStr(obj, "stderr")
+		return joinNonEmpty(stdout, stderr), true
+	}
+	if s, ok := read(output); ok {
+		return s
+	}
+	text := ExtractText(output)
+	if parsed, err := jsonx.ParseString(text); err == nil {
+		if s, ok := read(parsed); ok {
+			return s
+		}
+	}
+	return text
+}
+
+// joinNonEmpty joins the non-empty parts with newlines.
+func joinNonEmpty(parts ...string) string {
+	var kept []string
+	for _, p := range parts {
+		if p != "" {
+			kept = append(kept, p)
+		}
+	}
+	return strings.Join(kept, "\n")
+}

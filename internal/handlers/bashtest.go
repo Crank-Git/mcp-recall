@@ -15,13 +15,25 @@ var (
 	failLineRe2 = regexp.MustCompile(`^[✕✗×●]\s`)
 	failLineRe3 = regexp.MustCompile(`^\(fail\)\s`)
 	failLineRe4 = regexp.MustCompile(`^--- FAIL:`)
+	passMarkRe  = regexp.MustCompile(`^\(pass\)\s`)
+	// bun's `error: …` precedes its (fail) line; pytest's `E   assert …` follows
+	// FAILED. The pytest marker is tested on the untrimmed line: it is always
+	// flush-left, and requiring that keeps indented prose starting "E  " out.
+	bunErrorRe  = regexp.MustCompile(`^error:\s`)
+	pytestErrRe = regexp.MustCompile(`^E\s{2,}\S`)
 
 	bunPassRe = regexp.MustCompile(`^(\d+)\s+pass$`)
 	bunFailRe = regexp.MustCompile(`^(\d+)\s+fail$`)
-	pytestRe  = regexp.MustCompile(`(\d+)\s+passed(?:,\s+(\d+)\s+failed)?(?:,\s+(\d+)\s+(?:skipped|warning))?`)
-	jestRe    = regexp.MustCompile(`Tests:\s+(?:(\d+)\s+failed,\s+)?(\d+)\s+passed(?:,\s+(\d+)\s+skipped)?`)
-	goOkRe    = regexp.MustCompile(`^ok\s+\S+`)
-	goFailRe  = regexp.MustCompile(`^FAIL\s+\S+`)
+	bunRanRe  = regexp.MustCompile(`^Ran\s+(\d+)\s+tests?\s+across\b`)
+	// pytest: "1 failed, 5 passed, 1 skipped, 2 warnings in 1.23s". The order
+	// varies (pytest puts failed first), so each count is read on its own.
+	pytestRe        = regexp.MustCompile(`\b\d+\s+(?:passed|failed)\b.*\bin\s+\d+(?:\.\d+)?s\b`)
+	pytestPassedRe  = regexp.MustCompile(`(\d+)\s+passed\b`)
+	pytestFailedRe  = regexp.MustCompile(`(\d+)\s+failed\b`)
+	pytestSkippedRe = regexp.MustCompile(`(\d+)\s+skipped\b`)
+	jestRe          = regexp.MustCompile(`Tests:\s+(?:(\d+)\s+failed,\s+)?(\d+)\s+passed(?:,\s+(\d+)\s+skipped)?`)
+	goOkRe          = regexp.MustCompile(`^ok\s+\S+`)
+	goFailRe        = regexp.MustCompile(`^FAIL\s+\S+`)
 )
 
 func atoi(s string) int {
@@ -35,20 +47,37 @@ func testRunnerHandler(toolName string, output any) Result {
 	stdout := extractStdout(output)
 	stderr := extractStderr(output)
 	combined := strings.TrimSpace(stdout + "\n" + stderr)
-	originalSize := byteLen(ExtractText(output))
+	originalSize := byteLen(BashOutputText(output))
 
+	// Collect failure names plus the message lines that say why (upstream
+	// #308): a name alone does not tell Claude what to fix. Message lines alone
+	// never decide the status: a passing run can print `error: …` from the
+	// code under test.
 	var failureLines []string
+	failureNames, passLines, failLines := 0, 0, 0
 	for _, line := range strings.Split(combined, "\n") {
 		t := strings.TrimSpace(line)
 		if t == "" {
 			continue
 		}
-		if failLineRe1.MatchString(t) || failLineRe2.MatchString(t) || failLineRe3.MatchString(t) || failLineRe4.MatchString(t) {
+		if passMarkRe.MatchString(t) {
+			passLines++
+		}
+		if failLineRe3.MatchString(t) {
+			failLines++
+		}
+		isName := failLineRe1.MatchString(t) || failLineRe2.MatchString(t) || failLineRe3.MatchString(t) || failLineRe4.MatchString(t)
+		isMessage := bunErrorRe.MatchString(t) || pytestErrRe.MatchString(line)
+		if isName {
+			failureNames++
+		}
+		if isName || isMessage {
 			failureLines = append(failureLines, firstChars(t, 120))
 		}
 	}
 
 	passed, failed, skipped := 0, 0, 0
+	ranTotal := -1
 	foundSummary := false
 
 	for _, line := range strings.Split(combined, "\n") {
@@ -62,14 +91,20 @@ func testRunnerHandler(toolName string, output any) Result {
 			failed = atoi(m[1])
 			foundSummary = true
 		}
-		if m := pytestRe.FindStringSubmatch(t); m != nil {
-			passed = atoi(m[1])
-			if m[2] != "" {
-				failed = atoi(m[2])
+		if m := bunRanRe.FindStringSubmatch(t); m != nil {
+			ranTotal = atoi(m[1])
+			foundSummary = true
+		}
+		if pytestRe.MatchString(t) {
+			count := func(re *regexp.Regexp) int {
+				if m := re.FindStringSubmatch(t); m != nil {
+					return atoi(m[1])
+				}
+				return 0
 			}
-			if m[3] != "" {
-				skipped = atoi(m[3])
-			}
+			passed = count(pytestPassedRe)
+			failed = count(pytestFailedRe)
+			skipped = count(pytestSkippedRe)
 			foundSummary = true
 		}
 		if m := jestRe.FindStringSubmatch(t); m != nil {
@@ -92,13 +127,27 @@ func testRunnerHandler(toolName string, output any) Result {
 		}
 	}
 
-	if !foundSummary && len(failureLines) == 0 {
+	if !foundSummary && failureNames == 0 {
 		return shellHandler(toolName, output)
 	}
 
+	// Without count lines (output cut by `tail`, or grepped), count bun's
+	// per-test lines rather than report nothing.
+	if passed == 0 {
+		passed = passLines
+	}
+	if failed == 0 {
+		failed = failLines
+	}
+	// A partial view must not invent a total: prefer the runner's own.
 	total := passed + failed + skipped
+	if ranTotal >= 0 {
+		total = ranTotal
+	}
+	// A failing test's name always means FAIL, even when no count line survived.
+	isFail := failed > 0 || failureNames > 0
 	status := "pass"
-	if failed > 0 {
+	if isFail {
 		status = "FAIL"
 	}
 	var parts []string
@@ -111,7 +160,9 @@ func testRunnerHandler(toolName string, output any) Result {
 	if skipped > 0 {
 		parts = append(parts, fmt.Sprintf("%d skipped", skipped))
 	}
-	summaryStr := "no results"
+	// No count survived (e.g. a cut-off jest run): say so, rather than claim
+	// the run produced no results.
+	summaryStr := "no counts in output"
 	if len(parts) > 0 {
 		summaryStr = strings.Join(parts, ", ")
 	}
@@ -121,7 +172,7 @@ func testRunnerHandler(toolName string, output any) Result {
 		totalStr = fmt.Sprintf(" (%d total)", total)
 	}
 	lines := []string{fmt.Sprintf("test runner — %s: %s%s", status, summaryStr, totalStr)}
-	if len(failureLines) > 0 {
+	if isFail && len(failureLines) > 0 {
 		lines = append(lines, "  failures:")
 		n := len(failureLines)
 		if n > maxBuildErrors {

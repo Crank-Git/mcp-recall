@@ -67,6 +67,19 @@ func (o *Obj) Delete(key string) {
 	}
 }
 
+// Clone returns a shallow copy: keys and values are copied, nested values shared.
+func (o *Obj) Clone() *Obj {
+	c := &Obj{keys: append([]string(nil), o.keys...), values: make(map[string]any, len(o.values))}
+	for k, v := range o.values {
+		c.values[k] = v
+	}
+	return c
+}
+
+// MarshalJSON renders the object like JSON.stringify, keeping key order, so an
+// Obj can be embedded in a struct encoded with encoding/json.
+func (o *Obj) MarshalJSON() ([]byte, error) { return []byte(Compact(o)), nil }
+
 // Parse decodes JSON into an order-preserving Value.
 func Parse(data []byte) (any, error) {
 	dec := json.NewDecoder(bytes.NewReader(data))

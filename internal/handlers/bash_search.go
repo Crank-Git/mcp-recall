@@ -97,7 +97,7 @@ var grepLineRe = regexp.MustCompile(`^(.+?):(\d+):(.*)$`)
 
 func grepHandler(toolName string, output any) Result {
 	stdout := extractStdout(output)
-	originalSize := byteLen(ExtractText(output))
+	originalSize := byteLen(BashOutputText(output))
 
 	var lines []string
 	for _, l := range strings.Split(stdout, "\n") {
@@ -149,7 +149,7 @@ var (
 
 func lsHandler(toolName string, output any) Result {
 	stdout := extractStdout(output)
-	originalSize := byteLen(ExtractText(output))
+	originalSize := byteLen(BashOutputText(output))
 
 	raw := strings.Split(stdout, "\n")
 	var nonEmpty []string
@@ -246,7 +246,7 @@ func lsHandler(toolName string, output any) Result {
 
 func findHandler(toolName string, output any) Result {
 	stdout := extractStdout(output)
-	originalSize := byteLen(ExtractText(output))
+	originalSize := byteLen(BashOutputText(output))
 
 	var paths []string
 	for _, l := range strings.Split(stdout, "\n") {

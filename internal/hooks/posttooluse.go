@@ -7,6 +7,8 @@ import (
 	"encoding/hex"
 	"fmt"
 	"math"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -26,8 +28,101 @@ import (
 // HookOutput is the JSON returned to Claude Code from PostToolUse. Empty fields
 // are omitted so a skip serialises to "{}".
 type HookOutput struct {
+	HookSpecificOutput *HookSpecificOutput `json:"hookSpecificOutput,omitempty"`
+	// Legacy field from before Claude Code documented updatedToolOutput;
+	// current versions ignore it (upstream #298).
 	UpdatedMCPToolOutput string `json:"updatedMCPToolOutput,omitempty"`
 	SuppressOutput       bool   `json:"suppressOutput,omitempty"`
+}
+
+// HookSpecificOutput carries the replacement output. UpdatedToolOutput is a
+// string for MCP tools, or the Bash response object (*jsonx.Obj) for Bash.
+type HookSpecificOutput struct {
+	HookEventName     string `json:"hookEventName"`
+	UpdatedToolOutput any    `json:"updatedToolOutput"`
+}
+
+// asBashResponse returns the Bash tool's response object, which may arrive
+// serialised as a JSON string; nil when it has no string stdout.
+func asBashResponse(toolResponse any) *jsonx.Obj {
+	value := toolResponse
+	if s, ok := value.(string); ok {
+		parsed, err := jsonx.ParseString(s)
+		if err != nil {
+			return nil
+		}
+		value = parsed
+	}
+	obj, ok := value.(*jsonx.Obj)
+	if !ok {
+		return nil
+	}
+	if _, ok := obj.Str("stdout"); !ok {
+		return nil
+	}
+	return obj
+}
+
+// maxPersistedBytes bounds a persisted Bash output read back from disk; a
+// larger one stays cut.
+const maxPersistedBytes = 20 * 1024 * 1024
+
+// withPersistedOutput returns the whole Bash output when Claude Code cut it.
+// Claude Code cuts Bash stdout at about 50 KB before this hook sees it, with no
+// marker in it, and saves the whole output (stdout, then stderr) to
+// persistedOutputPath. Summarising the cut misstates every total (upstream
+// #316), so the file is read back when it is plainly the one Claude Code
+// wrote: absolute, in a tool-results directory, and exactly
+// persistedOutputSize bytes. Anything else leaves the response as it is.
+func withPersistedOutput(toolResponse any) any {
+	bash := asBashResponse(toolResponse)
+	if bash == nil {
+		return toolResponse
+	}
+	path, ok := bash.Str("persistedOutputPath")
+	sizeV, _ := bash.Get("persistedOutputSize")
+	size, isNum := sizeV.(float64)
+	if !ok || !isNum {
+		return toolResponse
+	}
+	if !filepath.IsAbs(path) || filepath.Base(filepath.Dir(path)) != "tool-results" || size > maxPersistedBytes {
+		return toolResponse
+	}
+	info, err := os.Stat(path)
+	if err != nil || float64(info.Size()) != size {
+		return toolResponse
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		logx.Debug(fmt.Sprintf("persisted output unreadable · %s · %v", path, err))
+		return toolResponse
+	}
+	full := bash.Clone()
+	full.Set("stdout", string(data))
+	full.Set("stderr", "")
+	return full
+}
+
+// replaceOutput replaces the tool's output with text via
+// hookSpecificOutput.updatedToolOutput; the top-level field alone is silently
+// ignored (upstream #298). For a built-in tool the replacement must match that
+// tool's output shape, or Claude Code delivers the original: a plain string
+// never matches Bash's object, so Bash gets its response back with stdout
+// replaced (upstream #304). The summary already carries stderr, so it is
+// cleared rather than shown twice.
+func replaceOutput(text string, toolResponse any) HookOutput {
+	var updated any = text
+	if bash := asBashResponse(toolResponse); bash != nil {
+		replaced := bash.Clone()
+		replaced.Set("stdout", text)
+		replaced.Set("stderr", "")
+		updated = replaced
+	}
+	return HookOutput{
+		HookSpecificOutput:   &HookSpecificOutput{HookEventName: "PostToolUse", UpdatedToolOutput: updated},
+		UpdatedMCPToolOutput: text,
+		SuppressOutput:       true,
+	}
 }
 
 func sha256Hex(s string) string {
@@ -57,6 +152,11 @@ func HandlePostToolUse(raw string) HookOutput {
 	toolResponse, _ := obj.Get("tool_response")
 
 	cfg := config.Load()
+	// The whole output, not the cut Claude Code hands over above ~50 KB (#316).
+	response := toolResponse
+	if toolName == "Bash" {
+		response = withPersistedOutput(toolResponse)
+	}
 
 	// 1. Denylist check
 	if denylist.IsDenied(toolName, cfg) {
@@ -64,8 +164,15 @@ func HandlePostToolUse(raw string) HookOutput {
 		return HookOutput{}
 	}
 
-	// 2. Extract text and check for secrets
-	fullContent := handlers.ExtractText(toolResponse)
+	// 2. Extract text and check for secrets. For Bash that is stdout + stderr:
+	//    the envelope's field names and escaped newlines are not output, so they
+	//    must not reach the store, the hints or FTS (upstream #306).
+	var fullContent string
+	if toolName == "Bash" {
+		fullContent = handlers.BashOutputText(response)
+	} else {
+		fullContent = handlers.ExtractText(response)
+	}
 	logx.Debug(fmt.Sprintf("intercepted %s · %s", toolName, format.Bytes(len(fullContent))))
 	if names := secrets.Find(fullContent); len(names) > 0 {
 		logx.Warn(fmt.Sprintf("skipped %s: detected %s", toolName, joinComma(names)))
@@ -94,7 +201,7 @@ func HandlePostToolUse(raw string) HookOutput {
 	cachedResponse := func(c *db.StoredOutput) HookOutput {
 		cachedDate := time.Unix(c.CreatedAt, 0).UTC().Format("2006-01-02")
 		logx.Debug(fmt.Sprintf("CACHE HIT · %s · id=%s · cached %s", toolName, c.ID, cachedDate))
-		return HookOutput{UpdatedMCPToolOutput: fmt.Sprintf("[recall:%s · cached · %s]\n%s", c.ID, cachedDate, c.Summary), SuppressOutput: true}
+		return replaceOutput(fmt.Sprintf("[recall:%s · cached · %s]\n%s", c.ID, cachedDate, c.Summary), toolResponse)
 	}
 
 	if inputHash != nil {
@@ -109,9 +216,16 @@ func HandlePostToolUse(raw string) HookOutput {
 	}
 
 	// 5. Compress
-	handler := handlers.GetHandler(toolName, toolResponse, toolInput)
+	handler := handlers.GetHandler(toolName, response, toolInput)
 	logx.Debug(fmt.Sprintf("handler: %s · %s", handlers.HandlerName(handler), toolName))
-	res := handler(toolName, toolResponse)
+	res := handler(toolName, response)
+	// An empty summary always passes the size check below, yet delivers
+	// nothing: the handler did not recognise this shape. Fall back rather than
+	// store it (upstream #296).
+	if strings.TrimSpace(res.Summary) == "" && res.OriginalSize > 0 {
+		logx.Debug(fmt.Sprintf("empty summary from %s · %s · falling back to genericHandler", handlers.HandlerName(handler), toolName))
+		res = handlers.GenericHandler(toolName, response)
+	}
 	summarySize := len(res.Summary)
 
 	// 6. Only store when compression is meaningful
@@ -179,7 +293,7 @@ func HandlePostToolUse(raw string) HookOutput {
 		hintStr = " · search: " + strings.Join(quoted, ", ")
 	}
 	header := fmt.Sprintf("[recall:%s · %s→%s (%d%% reduction)%s]", stored.ID, format.Bytes(res.OriginalSize), format.Bytes(summarySize), reduction, hintStr)
-	return HookOutput{UpdatedMCPToolOutput: header + "\n" + res.Summary, SuppressOutput: true}
+	return replaceOutput(header+"\n"+res.Summary, toolResponse)
 }
 
 func joinComma(xs []string) string {

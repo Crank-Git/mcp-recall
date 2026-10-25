@@ -62,3 +62,16 @@ func TestNewlineCdPrefix(t *testing.T) {
 		}
 	}
 }
+
+// Upstream #302: leading wrappers are unwrapped before classifying.
+func TestWrapperPrefix(t *testing.T) {
+	if !ShouldRetainFullBody("balanced", "Bash", "timeout 30 curl https://x") {
+		t.Error("timeout curl should keep its body")
+	}
+	if !ShouldRetainFullBody("balanced", "Bash", "env CI=1 gh api /x") {
+		t.Error("env gh api should keep its body")
+	}
+	if ShouldRetainFullBody("balanced", "Bash", "timeout 30 git diff") {
+		t.Error("timeout git diff should not keep its body")
+	}
+}
