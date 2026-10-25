@@ -271,18 +271,21 @@ func Search(database *sql.DB, projectKey string, args SearchArgs) string {
 		}
 		summaryLine := fmt.Sprintf("%d. %s · %s · %s\n   %s%s", i+1, item.ID, item.ToolName, formatDate(item.CreatedAt), excerpt, ellipsis)
 
-		snippet := db.RetrieveSnippet(database, item.ID, args.Query)
-		if snippet == "" {
+		// The excerpt is placed on the match, so the agent sees it without a
+		// second call (upstream #405).
+		match := db.RetrieveMatchWindow(database, item.ID, args.Query, snippetMax)
+		if match == nil {
 			lines = append(lines, summaryLine)
 			continue
 		}
-		snipText := strings.TrimSpace(oneline(snippet))
-		capped := firstChars(snipText, snippetMax)
-		trailing := ""
-		if runeLen(snipText) > snippetMax {
-			trailing = "…"
+		lead, trail := "", ""
+		if match.CutStart {
+			lead = "…"
 		}
-		lines = append(lines, fmt.Sprintf("%s\n   > …%s%s", summaryLine, capped, trailing))
+		if match.CutEnd {
+			trail = "…"
+		}
+		lines = append(lines, fmt.Sprintf("%s\n   > %s%s%s", summaryLine, lead, strings.TrimSpace(oneline(match.Text)), trail))
 	}
 
 	return fmt.Sprintf("Found %d result%s for \"%s\":\n\n%s", len(items), plural(len(items)), args.Query, strings.Join(lines, "\n\n"))
