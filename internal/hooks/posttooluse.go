@@ -210,7 +210,7 @@ func HandlePostToolUse(raw string) HookOutput {
 	//    attribution (upstream #251). Bash only; "" (no bare verb) stores NULL.
 	var commandFP *string
 	if toolName == "Bash" && command != "" {
-		if fp := handlers.CommandFingerprint(handlers.NormalizeCommand(command)); fp != "" {
+		if fp := handlers.BashFingerprint(command); fp != "" {
 			commandFP = &fp
 		}
 	}
@@ -235,15 +235,16 @@ func HandlePostToolUse(raw string) HookOutput {
 	}
 
 	// 6. Compress
-	handler := handlers.GetHandler(toolName, response, toolInput)
-	logx.Debug(fmt.Sprintf("handler: %s · %s", handlers.HandlerName(handler), toolName))
+	handler, handlerName := handlers.GetNamedHandler(toolName, response, toolInput)
+	logx.Debug(fmt.Sprintf("handler: %s · %s", handlerName, toolName))
 	res := handler(toolName, response)
 	// An empty summary always passes the size check below, yet delivers
 	// nothing: the handler did not recognise this shape. Fall back rather than
 	// store it (upstream #296).
 	if strings.TrimSpace(res.Summary) == "" && res.OriginalSize > 0 {
-		logx.Debug(fmt.Sprintf("empty summary from %s · %s · falling back to genericHandler", handlers.HandlerName(handler), toolName))
+		logx.Debug(fmt.Sprintf("empty summary from %s · %s · falling back to genericHandler", handlerName, toolName))
 		res = handlers.GenericHandler(toolName, response)
+		handlerName = "genericHandler"
 	}
 	summarySize := len(res.Summary)
 
@@ -264,7 +265,7 @@ func HandlePostToolUse(raw string) HookOutput {
 	//    the real content) is passed through so dedup works even when the body is
 	//    dropped.
 	fullRetained := 1
-	if !retention.ShouldRetainFullBody(cfg.Store.Retention, toolName, command) {
+	if !retention.ShouldRetainFullBody(cfg.Store.Retention, toolName, command, res.Summary) {
 		fullRetained = 0
 		logx.Debug(fmt.Sprintf("summary-only · %s · retention=%s", toolName, cfg.Store.Retention))
 	}
@@ -282,6 +283,8 @@ func HandlePostToolUse(raw string) HookOutput {
 		FullRetained:  &fullRetained,
 		CommandFP:     commandFP,
 		DeliveredSize: &delivered,
+		// The handler whose summary is stored, for `discover` (upstream #341).
+		Handler: &handlerName,
 	})
 	if err != nil {
 		logx.Error("post-tool-use store failed: " + err.Error())

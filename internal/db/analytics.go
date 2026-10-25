@@ -6,6 +6,7 @@ package db
 import (
 	"database/sql"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -53,6 +54,108 @@ func GetStats(database *sql.DB, projectKey string) Stats {
 		s.CompressionRatio = float64(s.TotalSummaryBytes) / float64(s.TotalOriginalBytes)
 	}
 	return s
+}
+
+// FallbackHandlers are the handlers that summarise without knowing the
+// output's source: the content fallbacks at the end of GetHandler, and the
+// Bash route for a command with no dedicated handler (contentReadHandler for a
+// read, upstream #358). A large, frequent route through one of these is where
+// a new handler would pay (#341).
+var FallbackHandlers = []string{"genericHandler", "jsonHandler", "shellHandler", "contentReadHandler"}
+
+// handlerWhere selects intercepted output with a recorded handler, or with
+// none when recorded is false. A NULL handler only means the row was stored
+// before upstream #341 (the migration cannot backfill), so those rows are
+// counted apart and never treated as a fallback.
+func handlerWhere(projectKey string, opts HandlerQueryOptions, recorded bool) (string, []any) {
+	is := "IS NULL"
+	if recorded {
+		is = "IS NOT NULL"
+	}
+	where := "WHERE project_key = ? AND tool_name != 'recall__note' AND handler " + is
+	params := []any{projectKey}
+	if opts.Since != 0 {
+		where += " AND created_at >= ?"
+		params = append(params, opts.Since)
+	}
+	return where, params
+}
+
+const handlerAggregates = `
+	COUNT(*),
+	COALESCE(SUM(original_size),0),
+	COALESCE(SUM(` + deliveredExpr + `),0),
+	COALESCE(SUM(CASE WHEN access_count > 0 THEN 1 ELSE 0 END),0)`
+
+// GetHandlerBreakdown returns per-handler savings and retrieval, sorted by
+// original_bytes desc (upstream #341).
+func GetHandlerBreakdown(database *sql.DB, projectKey string, opts HandlerQueryOptions) []HandlerBreakdownRow {
+	where, params := handlerWhere(projectKey, opts, true)
+	rows, err := database.Query(`
+		SELECT handler, `+handlerAggregates+`
+		FROM stored_outputs
+		`+where+`
+		GROUP BY handler
+		ORDER BY 3 DESC`, params...)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	var out []HandlerBreakdownRow
+	for rows.Next() {
+		var r HandlerBreakdownRow
+		if err := rows.Scan(&r.Handler, &r.Items, &r.OriginalBytes, &r.SummaryBytes, &r.Retrieved); err != nil {
+			return out
+		}
+		out = append(out, r)
+	}
+	return out
+}
+
+// GetFallbackRoutes returns the tools and Bash command families whose output
+// went to a fallback handler, sorted by original_bytes desc: the candidates
+// for a new handler (upstream #341).
+func GetFallbackRoutes(database *sql.DB, projectKey string, opts HandlerQueryOptions) []FallbackRouteRow {
+	where, params := handlerWhere(projectKey, opts, true)
+	placeholders := strings.TrimSuffix(strings.Repeat("?, ", len(FallbackHandlers)), ", ")
+	for _, h := range FallbackHandlers {
+		params = append(params, h)
+	}
+	rows, err := database.Query(`
+		SELECT tool_name,
+			CASE WHEN tool_name = 'Bash' THEN COALESCE(command_fp, 'unknown') END,
+			handler, `+handlerAggregates+`
+		FROM stored_outputs
+		`+where+` AND handler IN (`+placeholders+`)
+		GROUP BY tool_name, 2, handler
+		ORDER BY 5 DESC`, params...)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	var out []FallbackRouteRow
+	for rows.Next() {
+		var r FallbackRouteRow
+		var fp sql.NullString
+		if err := rows.Scan(&r.ToolName, &fp, &r.Handler, &r.Items, &r.OriginalBytes, &r.SummaryBytes, &r.Retrieved); err != nil {
+			return out
+		}
+		if fp.Valid {
+			v := fp.String
+			r.CommandFP = &v
+		}
+		out = append(out, r)
+	}
+	return out
+}
+
+// CountUnrecordedHandler counts intercepted rows stored before handlers were
+// recorded (upstream #341): reported, never analysed.
+func CountUnrecordedHandler(database *sql.DB, projectKey string, opts HandlerQueryOptions) int {
+	where, params := handlerWhere(projectKey, opts, false)
+	var n int
+	_ = database.QueryRow(`SELECT COUNT(*) FROM stored_outputs `+where, params...).Scan(&n)
+	return n
 }
 
 // GetBashCommandBreakdown returns per-command-family storage stats for Bash

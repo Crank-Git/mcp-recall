@@ -60,24 +60,35 @@ func trimTrailingEmpty(lines []string) []string {
 	return lines[:end]
 }
 
+// formatLines keeps the first max lines after collapsing repeats (upstream
+// #340), so the budget goes to distinct lines, each clipped to MaxLineChars
+// (#349), then any rtk recovery hints (#353) from the lines cut. The header
+// and the overflow count input lines, not summary lines.
 func formatLines(text string, max int) (header, body string) {
 	lines := trimTrailingEmpty(strings.Split(text, "\n"))
 	total := len(lines)
-	truncated := total > max
-	n := total
-	if n > max {
-		n = max
+	shown := collapseRepeats(lines, max, MaxLineChars)
+	hidden := total
+	texts := make([]string, len(shown))
+	for i, l := range shown {
+		hidden -= l.count
+		texts[i] = l.text
 	}
-	head := strings.Join(lines[:n], "\n")
+	head := strings.Join(texts, "\n")
 	overflow := ""
-	if truncated {
-		overflow = fmt.Sprintf("\n… (+%d more lines)", total-max)
+	if hidden > 0 {
+		overflow = fmt.Sprintf("\n… (+%d more lines)", hidden)
+	}
+	// Collapsed like the head, so a repeated hint costs one line.
+	var extra strings.Builder
+	for _, h := range recoveryHints(collapsedTexts(lines[total-hidden:])) {
+		extra.WriteString("\n" + clipLine(h, MaxLineChars))
 	}
 	plural := "s"
 	if total == 1 {
 		plural = ""
 	}
-	return fmt.Sprintf("%d line%s", total, plural), head + overflow
+	return fmt.Sprintf("%d line%s", total, plural), head + overflow + extra.String()
 }
 
 // parseStructured parses a {stdout, stderr, output, returncode, exit_code}

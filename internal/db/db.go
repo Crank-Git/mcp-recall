@@ -110,6 +110,11 @@ var migrations = []string{
 	// fall back to summary_size. summary_size stays the stored size of a
 	// summary-only row.
 	"ALTER TABLE stored_outputs ADD COLUMN delivered_size INTEGER",
+	// Name of the handler that produced the summary (upstream #341). NULL for
+	// notes and for rows written before this migration, which `discover`
+	// reports as "stored before handlers were recorded", never "no handler
+	// matched".
+	"ALTER TABLE stored_outputs ADD COLUMN handler TEXT",
 }
 
 // DefaultDBPath returns the SQLite path for a project. Respects RECALL_DB_PATH;

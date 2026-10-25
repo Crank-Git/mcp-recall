@@ -163,3 +163,11 @@ func TestBundledCloudflareDocs(t *testing.T) {
 		t.Error("claimed another Cloudflare tool")
 	}
 }
+
+// A profile handler is recorded as profile:<id>, as upstream names it (#341).
+func TestProfileHandlerName(t *testing.T) {
+	h, name := lookupNamedHandler("mcp__cloudflare__docs", []string{"user", "community", "bundled"})
+	if h == nil || name != "profile:mcp__cloudflare__docs" {
+		t.Errorf("name = %q", name)
+	}
+}

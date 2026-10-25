@@ -860,3 +860,26 @@ func parseDayUnix(date string) int64 {
 	tm, _ := time.Parse("2006-01-02", date)
 	return tm.UTC().Unix()
 }
+
+// The per-handler section shows each handler's retrieval rate and counts rows
+// stored before handlers were recorded apart (upstream #341).
+func TestStatsHandlerBreakdown(t *testing.T) {
+	d := setup(t)
+	for _, h := range []string{"gitDiffHandler", "shellHandler", ""} {
+		in := baseInput()
+		in.ToolName = "Bash"
+		in.OriginalSize = 8000
+		in.Summary = strings.Repeat("d", 80)
+		if h != "" {
+			name := h
+			in.Handler = &name
+		}
+		store(t, d, in)
+	}
+	r := Stats(d, projectKey, StatsArgs{})
+	hasT(t, r, "By handler (sorted by original size):")
+	if !regexp.MustCompile(`gitDiffHandler\s+1 item\s+7\.8KB → 80B\s+99%\s+0% retrieved`).MatchString(r) {
+		t.Errorf("missing handler row:\n%s", r)
+	}
+	hasT(t, r, "(1 older item stored before handlers were recorded are not included)")
+}

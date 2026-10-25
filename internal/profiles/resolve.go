@@ -105,16 +105,23 @@ func makeHandler(p Loaded) handlers.Handler {
 // LookupHandler returns a compression handler for a tool if a profile matches
 // the given tiers, or nil.
 func LookupHandler(toolName string, tierStrs []string) handlers.Handler {
+	h, _ := lookupNamedHandler(toolName, tierStrs)
+	return h
+}
+
+// lookupNamedHandler is LookupHandler plus the handler's name,
+// `profile:<id>`, as upstream names a profile handler (#341).
+func lookupNamedHandler(toolName string, tierStrs []string) (handlers.Handler, string) {
 	tiers := make([]Tier, len(tierStrs))
 	for i, s := range tierStrs {
 		tiers[i] = Tier(s)
 	}
 	match := resolveProfile(toolName, Load(), tiers)
 	if match == nil {
-		return nil
+		return nil, ""
 	}
 	logx.Debug("profile match · " + match.Spec.Profile.ID + " (" + string(match.Tier) + ") · " + toolName)
-	return makeHandler(*match)
+	return makeHandler(*match), "profile:" + match.Spec.Profile.ID
 }
 
 // ResolveAllTiers resolves the best profile for a tool across all tiers from a
@@ -126,7 +133,5 @@ func ResolveAllTiers(toolName string, loaded []Loaded) *Loaded {
 // Register wires the profile resolver into the handler dispatch. Call once at
 // startup so PostToolUse and the MCP server both apply profiles.
 func Register() {
-	handlers.ProfileLookup = func(toolName string, tiers []string) handlers.Handler {
-		return LookupHandler(toolName, tiers)
-	}
+	handlers.ProfileLookup = lookupNamedHandler
 }

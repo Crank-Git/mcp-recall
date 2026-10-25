@@ -431,18 +431,195 @@ var wrapperPrefixes = []*regexp.Regexp{
 	regexp.MustCompile(`^(?:sudo|doas)\s+[A-Za-z_./~]`),
 }
 
-// NormalizeCommand normalises a Bash command so routing sees the real
-// subcommand: it unwraps leading `cd <dir>` prefixes (see cdPrefixRe for the
-// separator and quoting shapes) and strips git global options (--no-pager,
-// -C <path>, -c <k=v>, --paginate, -P) that would otherwise push `git diff`
-// output to the generic shell fallback. It also strips leading wrappers that
-// run the real command unchanged (`timeout 30`, `time`, `nice -n 10`, `env
-// A=1`, `A=1`, `sudo`; see wrapperPrefixes), so routing, the fingerprint and
-// retention all see the wrapped command (upstream #302). Chained prefixes
-// across mixed separators and wrappers (`cd /a && timeout 60 git diff`) are
-// unwrapped up to 8 hops, as upstream bounds it.
-func NormalizeCommand(command string) string {
+// quotedCommand returns the command a quoted or bare argument runs, as a
+// shell would pass it on: one single-quoted span, one double-quoted span (a
+// backslash before a double quote, backslash, backtick or $ unescaped), or
+// the bare words as they are. A quoted span may be followed by a local
+// pipeline or separator (`'cmd' | head`), which runs on this side but reads
+// the same output, so it is kept. Anything else after the quote (an escaped
+// quote, or 'a' b) is ambiguous: false.
+func quotedCommand(arg string) (string, bool) {
+	s := strings.TrimSpace(arg)
+	var body, rest string
+	switch {
+	case strings.HasPrefix(s, "'"):
+		end := strings.IndexByte(s[1:], '\'')
+		if end < 0 {
+			return "", false
+		}
+		body, rest = s[1:1+end], s[2+end:]
+	case strings.HasPrefix(s, `"`):
+		m := doubleQuotedRe.FindStringSubmatch(s)
+		if m == nil {
+			return "", false
+		}
+		body = dqEscapeRe.ReplaceAllString(m[1], "$1")
+		rest = s[len(m[0]):]
+	default:
+		return s, true
+	}
+	if strings.TrimSpace(rest) == "" {
+		return strings.TrimSpace(body), true
+	}
+	if localOpRe.MatchString(rest) {
+		return strings.TrimSpace(body) + " " + strings.TrimSpace(rest), true
+	}
+	return "", false
+}
+
+var (
+	doubleQuotedRe = regexp.MustCompile(`^"((?:[^"\\]|\\[\s\S])*)"`)
+	dqEscapeRe     = regexp.MustCompile("\\\\([\"\\\\`$])")
+	localOpRe      = regexp.MustCompile(`^\s*[|;&<>]`)
+	optionWordRe   = regexp.MustCompile(`^(-[^\s'"]*)(?:\s+|$)`)
+	optionValueRe  = regexp.MustCompile(`^[^\s'"]+(?:\s+|$)`)
+	// targetRe is a host, container or `user@host`: no leading dash, quote or
+	// operator.
+	targetRe = regexp.MustCompile(`^[A-Za-z0-9_][\w.@:-]*\s+`)
+)
+
+// skipOptions splits `-xyz` option clusters off the front of args. withValue
+// lists the single-letter options that take a value (attached, `-p22`, or as
+// the next word), flags those that take none, long the long options (`--name`
+// or `--name=value`; true when they take a value). Returns what follows the
+// options, or false on any option outside those lists or a quoted value.
+func skipOptions(args, withValue, flags string, long map[string]bool) (string, bool) {
+	rest := args
+	for i := 0; i < 16; i++ {
+		opt := optionWordRe.FindStringSubmatch(rest)
+		if opt == nil {
+			return rest, true
+		}
+		rest = rest[len(opt[0]):]
+		word := opt[1]
+		if word == "--" {
+			return rest, true
+		}
+		needsValue := false
+		if strings.HasPrefix(word, "--") {
+			name, _, hasInline := strings.Cut(word[2:], "=")
+			takesValue, known := long[name]
+			if !known {
+				return "", false
+			}
+			needsValue = takesValue && !hasInline
+		} else {
+			for j := 1; j < len(word); j++ {
+				ch := word[j]
+				if strings.IndexByte(withValue, ch) >= 0 {
+					needsValue = j == len(word)-1 // otherwise the value is attached
+					break
+				}
+				if strings.IndexByte(flags, ch) < 0 {
+					return "", false
+				}
+			}
+		}
+		if needsValue {
+			value := optionValueRe.FindString(rest)
+			if value == "" {
+				return "", false
+			}
+			rest = rest[len(value):]
+		}
+	}
+	return "", false
+}
+
+// ssh(1) single-letter options. -N (no remote command) is in neither list, so
+// a tunnel is never unwrapped.
+const (
+	sshWithValue        = "BbcDEeFIiJLlmOoPpQRSWw"
+	sshFlags            = "46AaCfGgKkMnqsTtVvXxYy"
+	dockerExecWithValue = "euw"
+	dockerExecFlags     = "dit"
+)
+
+var dockerExecLong = map[string]bool{
+	"detach": false, "interactive": false, "tty": false, "privileged": false,
+	"env": true, "env-file": true, "user": true, "workdir": true, "detach-keys": true,
+}
+
+var (
+	rtkPrefixRe  = regexp.MustCompile(`^rtk\s+(?:(?:-v+|--verbose|--skip-env)\s+)*`)
+	rtkOwnReadRe = regexp.MustCompile(`^(read|recall)(\s|$)`)
+	sshPrefixRe  = regexp.MustCompile(`^ssh\s+`)
+	pctExecRe    = regexp.MustCompile(`^pct\s+exec\s+\d+\s+(?:--\s+)?`)
+	dockerExecRe = regexp.MustCompile(`^docker\s+exec\s+`)
+	// Upstream ends with a lookahead for the opening quote; RE2 has none, so
+	// the quote is matched and left in place by the caller.
+	shellDashCRe = regexp.MustCompile(`^(?:ba)?sh\s+-[elx]*c[elx]*\s+['"]`)
+)
+
+// remoteWrapper is a command that runs another command elsewhere (upstream
+// #339): `ssh host cmd`, `pct exec <id> -- cmd`, `docker exec ctr cmd`, and
+// `bash -c 'cmd'`; or through rtk's proxy, `rtk git diff` (#353). unwrap
+// returns the command run, or false when the shape is not unambiguous. label
+// names the wrapper in the fingerprint; `bash -c` runs locally and has none.
+type remoteWrapper struct {
+	label  string
+	unwrap func(c string) (string, bool)
+}
+
+// optionTarget unwraps `<verb> [options] <target> <command>` for ssh and
+// docker exec.
+func optionTarget(prefix *regexp.Regexp, withValue, flags string, long map[string]bool) func(string) (string, bool) {
+	return func(c string) (string, bool) {
+		loc := prefix.FindStringIndex(c)
+		if loc == nil {
+			return "", false
+		}
+		args, ok := skipOptions(c[loc[1]:], withValue, flags, long)
+		if !ok {
+			return "", false
+		}
+		target := targetRe.FindString(args)
+		if target == "" {
+			return "", false
+		}
+		return quotedCommand(args[len(target):])
+	}
+}
+
+var remoteWrappers = []remoteWrapper{
+	// rtk's own `read` and `recall` run no other command, so they stay as they
+	// are: `rtk read f` fingerprints as `rtk read` and is a content read.
+	{"rtk", func(c string) (string, bool) {
+		loc := rtkPrefixRe.FindStringIndex(c)
+		if loc == nil {
+			return "", false
+		}
+		inner := c[loc[1]:]
+		if rtkOwnReadRe.MatchString(inner) {
+			return "", false
+		}
+		return inner, true
+	}},
+	{"ssh", optionTarget(sshPrefixRe, sshWithValue, sshFlags, nil)},
+	{"pct exec", func(c string) (string, bool) {
+		loc := pctExecRe.FindStringIndex(c)
+		if loc == nil {
+			return "", false
+		}
+		return quotedCommand(c[loc[1]:])
+	}},
+	{"docker exec", optionTarget(dockerExecRe, dockerExecWithValue, dockerExecFlags, dockerExecLong)},
+	{"", func(c string) (string, bool) {
+		loc := shellDashCRe.FindStringIndex(c)
+		if loc == nil {
+			return "", false
+		}
+		return quotedCommand(c[loc[1]-1:]) // keep the opening quote
+	}},
+}
+
+// unwrapCommand is NormalizeCommand, plus the labelled wrappers it stepped
+// through, outermost first.
+func unwrapCommand(command string) (string, []string) {
 	c := strings.TrimSpace(command)
+	var wrappers []string
+	// Bounded: chained prefixes are rare, and a bound keeps a pathological
+	// input from looping. Stops as soon as no prefix matches.
 	for i := 0; i < 8; i++ {
 		if m := cdPrefixRe.FindStringSubmatch(c); m != nil {
 			c = strings.TrimSpace(m[1])
@@ -456,18 +633,72 @@ func NormalizeCommand(command string) string {
 				break
 			}
 		}
-		if !stripped {
+		if stripped {
+			continue
+		}
+		unwrapped := false
+		for _, w := range remoteWrappers {
+			if inner, ok := w.unwrap(c); ok && inner != "" {
+				if w.label != "" {
+					wrappers = append(wrappers, w.label)
+				}
+				c = inner
+				unwrapped = true
+				break
+			}
+		}
+		if !unwrapped {
 			break
 		}
 	}
-	return gitGlobalOpts.ReplaceAllString(c, "git ")
+	return gitGlobalOpts.ReplaceAllString(c, "git "), wrappers
+}
+
+// NormalizeCommand normalises a Bash command so routing sees the real
+// subcommand: it unwraps leading `cd <dir>` prefixes (see cdPrefixRe for the
+// separator and quoting shapes) and strips git global options (--no-pager,
+// -C <path>, -c <k=v>, --paginate, -P) that would otherwise push `git diff`
+// output to the generic shell fallback.
+//
+// It also strips leading wrappers that run the real command unchanged
+// (`timeout 30`, `time`, `nice -n 10`, `env A=1`, `A=1`, `sudo`; see
+// wrapperPrefixes), so routing, the fingerprint and retention all see the
+// wrapped command (upstream #302).
+//
+// And it unwraps commands run elsewhere (`ssh host 'git status'`, `pct exec
+// 108 -- journalctl`, `docker exec ctr ps`, `bash -c '…'`; see
+// remoteWrappers), so they reach the handler for the command they run (#339).
+// `rtk <cmd>` unwraps the same way for the fingerprint and retention, but not
+// for routing (#353).
+//
+// Chained prefixes are unwrapped across mixed separators and wrappers (`cd /a
+// && timeout 60 git diff`, `ssh h 'cd /x && git diff'`) up to 8 hops, as
+// upstream bounds it.
+func NormalizeCommand(command string) string {
+	c, _ := unwrapCommand(command)
+	return c
+}
+
+// BashFingerprint is the fingerprint the hook stores for a raw Bash command:
+// CommandFingerprint of the normalised command, prefixed by any wrappers it
+// ran through (`ssh git status`, `pct exec journalctl`, `rtk git diff`), so
+// local, remote and rtk-run stay apart in analytics (upstream #339, #353).
+// Wrapper labels are constants: no host, id or container name.
+func BashFingerprint(command string) string {
+	inner, wrappers := unwrapCommand(command)
+	parts := wrappers
+	if fp := CommandFingerprint(inner); fp != "" {
+		parts = append(parts, fp)
+	}
+	return strings.Join(parts, " ")
 }
 
 // subcommandTools are dispatchers whose first token names a tool family, not the
 // operation — the meaningful fingerprint is "verb subcommand" ("git diff").
+// rtk is here for its own commands (`rtk read`), which are not unwrapped.
 var subcommandTools = map[string]bool{
 	"git": true, "cargo": true, "go": true, "npm": true, "pnpm": true,
-	"yarn": true, "bun": true, "docker": true, "kubectl": true,
+	"yarn": true, "bun": true, "docker": true, "kubectl": true, "rtk": true,
 }
 
 // wrapperTools prefix a real command; skipped so the fingerprint names the
@@ -527,16 +758,78 @@ const ReadPassthroughMaxBytes = 8 * 1024
 // commandSplitRe splits a command on pipes and sequence operators.
 var commandSplitRe = regexp.MustCompile(`\||;|&&|\n`)
 
+// splitTopLevel splits command at every |, ||, ;, &&, & and newline outside
+// quotes, escapes and ( … ), so a quoted remote command (`ssh h 'cat f |
+// head'`) stays one segment until it is unwrapped. Every operator is ASCII,
+// so the scan is byte-wise.
+func splitTopLevel(command string) []string {
+	var parts []string
+	var quote byte
+	depth, start := 0, 0
+	for i := 0; i < len(command); i++ {
+		ch := command[i]
+		switch {
+		case quote == '\'':
+			if ch == '\'' {
+				quote = 0
+			}
+		case ch == '\\':
+			i++
+		case quote != 0:
+			if ch == quote {
+				quote = 0
+			}
+		case ch == '\'' || ch == '"' || ch == '`':
+			quote = ch
+		case ch == '(':
+			depth++
+		case ch == ')':
+			if depth > 0 {
+				depth--
+			}
+		case depth == 0 && (ch == '|' || ch == ';' || ch == '&' || ch == '\n'):
+			parts = append(parts, command[start:i])
+			start = i + 1
+		}
+	}
+	parts = append(parts, command[start:])
+	out := parts[:0]
+	for _, p := range parts {
+		if strings.TrimSpace(p) != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// unwrappedSegments returns the quote-aware commands in command, each without
+// its cd/wrapper prefixes. A segment that unwraps to a command line of its own
+// (`ssh h 'cat f | head'`) is split again, a bounded number of times.
+func unwrappedSegments(command string, depth int) []string {
+	var out []string
+	for _, part := range splitTopLevel(command) {
+		c := NormalizeCommand(part)
+		if depth < 3 && len(splitTopLevel(c)) > 1 {
+			out = append(out, unwrappedSegments(c, depth+1)...)
+		} else {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
 // commandSegments returns the commands in command, each without its
-// cd/wrapper prefixes. The split ignores quoting, so a quoted `| head` can read
-// as a command of its own; ReadPassthroughMaxBytes caps what such a miss
-// delivers.
+// cd/wrapper prefixes: the unwrappedSegments, plus a split that ignores
+// quoting. The second finds a read no unwrap reaches (`for h in a b; do ssh
+// $h '… | head'`, a multi-range `sed -n '1,5p;9,12p'`). Missing a read
+// summarizes lines Claude asked for; a false one (`echo "x | head"`) delivers
+// at most ReadPassthroughMaxBytes.
 func commandSegments(command string) []string {
 	parts := commandSplitRe.Split(command, -1)
 	for i, p := range parts {
 		parts[i] = NormalizeCommand(p)
 	}
-	return parts
+	return append(unwrappedSegments(command, 0), parts...)
 }
 
 // sedLine is a sed line address: a number, a shell expansion the shell turns
@@ -554,6 +847,7 @@ var (
 	grepLimitRe    = regexp.MustCompile(`\s(-[a-zA-Z]*[ABCm]\s*\d+|--(?:after-|before-)?context[=\s]\d+|--max-count[=\s]\d+)`)
 	catDiffShowRe  = regexp.MustCompile(`^(cat|git\s+(diff|show))(\s|$)`)
 	logPatchRe     = regexp.MustCompile(`^git\s+(log|stash\s+show)(\s.*)?\s(-p|--patch|-u)(\s|$)`)
+	rtkReadRe      = regexp.MustCompile(`^rtk\s+(?:-\S+\s+)*(read|recall)(\s|$)`)
 )
 
 // IsBoundedRead reports whether any command in command limits its own output:
@@ -576,13 +870,14 @@ func IsBoundedRead(command string) bool {
 // read, `cat`, `git diff`/`git show`, or a patch from `git log -p`/`git stash
 // show -p`. Their summaries keep stats or a head and tail, which drops what
 // Claude asked for, so the hook delivers small ones whole and balanced
-// retention keeps the body of large ones (upstream #332).
+// retention keeps the body of large ones (upstream #332). rtk's rewrite of a
+// read, `rtk read f`, and `rtk recall <hash>` count too (#353).
 func IsContentRead(command string) bool {
 	if IsBoundedRead(command) {
 		return true
 	}
 	for _, s := range commandSegments(command) {
-		if catDiffShowRe.MatchString(s) || logPatchRe.MatchString(s) {
+		if catDiffShowRe.MatchString(s) || logPatchRe.MatchString(s) || rtkReadRe.MatchString(s) {
 			return true
 		}
 	}
@@ -648,15 +943,18 @@ const (
 
 // compoundHandler summarises several commands' output (upstream #308): no
 // single command's handler fits, and an `ls` handler on `ls …; git diff | wc
-// -c` dropped the second result. Short output is returned whole (the hook then
-// passes it through unstored); long output keeps head, tail and the error
-// lines between.
+// -c` dropped the second result. Short output is returned whole bar its
+// over-wide lines (upstream #349), so the hook usually passes it through
+// unstored; long output keeps head, tail and the error lines between.
 func compoundHandler(_ string, output any) Result {
 	text := BashOutputText(output)
 	originalSize := byteLen(text)
 	lines := strings.Split(text, "\n")
 	if len(lines) <= compoundHeadLines+compoundTailLines {
-		return Result{Summary: text, OriginalSize: originalSize}
+		for i, l := range lines {
+			lines[i] = clipLine(l, MaxLineChars)
+		}
+		return Result{Summary: strings.Join(lines, "\n"), OriginalSize: originalSize}
 	}
 	window := summarizeLineWindow(lines, compoundHeadLines, compoundTailLines)
 	return Result{Summary: fmt.Sprintf("[bash · compound command · %d lines]\n%s", len(lines), window), OriginalSize: originalSize}
@@ -669,9 +967,17 @@ func GetBashHandler(input any) Handler {
 	if rawCommand == "" {
 		return shellHandler
 	}
-	command := NormalizeCommand(rawCommand)
+	command, wrappers := unwrapCommand(rawCommand)
 	if IsCompoundCommand(command) {
 		return compoundHandler
+	}
+	// rtk reshapes output (a diff without its headers), so a parser for the
+	// raw command could read it wrong and claim a false count, the #350 class
+	// (upstream #353).
+	for _, w := range wrappers {
+		if w == "rtk" {
+			return shellHandler
+		}
 	}
 	switch {
 	case cmdGitGrep.MatchString(command):

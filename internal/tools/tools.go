@@ -409,6 +409,11 @@ func storedToObj(s db.StoredOutput) *jsonx.Obj {
 	} else {
 		o.Set("delivered_size", nil)
 	}
+	if s.Handler != nil {
+		o.Set("handler", *s.Handler)
+	} else {
+		o.Set("handler", nil)
+	}
 	return o
 }
 
@@ -885,6 +890,45 @@ func Stats(database *sql.DB, projectKey string, args StatsArgs) string {
 			lines = append(lines, fmt.Sprintf("  %s  %s item%s  %s → %s  %s",
 				padEnd(row.CommandFP, colW), padStart(strconv.Itoa(row.Items), 4), itemWord,
 				padStart(format.Bytes(row.OriginalBytes), 8), padEnd(format.Bytes(row.SummaryBytes), 8), padStart(reduction, 4)))
+		}
+	}
+
+	// Per-handler retrieval rate (upstream #341): a handler whose summaries are
+	// often retrieved is dropping something Claude needed. Rows stored before
+	// handlers were recorded are counted, never attributed.
+	handlerBreakdown := db.GetHandlerBreakdown(database, projectKey, db.HandlerQueryOptions{})
+	if len(handlerBreakdown) > 0 {
+		lines = append(lines, "", "By handler (sorted by original size):")
+		colW := 0
+		for _, r := range handlerBreakdown {
+			if l := runeLen(r.Handler); l > colW {
+				colW = l
+			}
+		}
+		if colW > 40 {
+			colW = 40
+		}
+		for _, row := range handlerBreakdown {
+			reduction := " —"
+			if row.OriginalBytes > 0 {
+				reduction = fmt.Sprintf("%d%%", int(math.Round((1-float64(row.SummaryBytes)/float64(row.OriginalBytes))*100)))
+			}
+			itemWord := "s"
+			if row.Items == 1 {
+				itemWord = " "
+			}
+			retrieved := fmt.Sprintf("%d%% retrieved", int(math.Round(float64(row.Retrieved)/float64(row.Items)*100)))
+			lines = append(lines, fmt.Sprintf("  %s  %s item%s  %s → %s  %s  %s",
+				padEnd(row.Handler, colW), padStart(strconv.Itoa(row.Items), 4), itemWord,
+				padStart(format.Bytes(row.OriginalBytes), 8), padEnd(format.Bytes(row.SummaryBytes), 8), padStart(reduction, 4),
+				retrieved))
+		}
+		if unrecorded := db.CountUnrecordedHandler(database, projectKey, db.HandlerQueryOptions{}); unrecorded > 0 {
+			plural := "s"
+			if unrecorded == 1 {
+				plural = ""
+			}
+			lines = append(lines, fmt.Sprintf("  (%d older item%s stored before handlers were recorded are not included)", unrecorded, plural))
 		}
 	}
 

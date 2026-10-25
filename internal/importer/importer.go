@@ -54,6 +54,9 @@ type importRow struct {
 	// DeliveredSize is optional for dumps predating upstream #319: missing →
 	// NULL, and savings figures fall back to summary_size for that row.
 	DeliveredSize *int64 `json:"delivered_size"`
+	// Handler is optional for dumps predating upstream #341: missing → NULL,
+	// "stored before handlers were recorded".
+	Handler *string `json:"handler"`
 }
 
 func (r importRow) validate(i int) []string {
@@ -106,6 +109,7 @@ func (r importRow) toStored(projectKey string) db.StoredOutput {
 		SummarySize: r.SummarySize, CreatedAt: r.CreatedAt, Pinned: r.Pinned,
 		AccessCount: r.AccessCount, LastAccessed: r.LastAccessed, InputHash: r.InputHash,
 		FullRetained: fullRetained, CommandFP: r.CommandFP, DeliveredSize: r.DeliveredSize,
+		Handler: r.Handler,
 	}
 }
 

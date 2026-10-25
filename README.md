@@ -58,6 +58,8 @@ mcprecall <command> [options]
   uninstall            Remove hooks + MCP server
   status               Show current configuration and health
   server               Run the recall MCP server (stdio)
+  discover             Rank output routed to fallback handlers: where a new
+                       handler would pay (--all, --since YYYY-MM-DD, --limit N)
   profiles <cmd>       Manage compression profiles
   learn                Generate profile suggestions from your installed MCPs
   import <file>        Restore items from a recall__export JSON dump

@@ -20,7 +20,7 @@ import (
 // storedColumns is the explicit column list matching StoredOutput scan order.
 const storedColumns = `id, project_key, session_id, tool_name, summary, full_content,
 	original_size, summary_size, created_at, pinned, access_count, last_accessed, input_hash, output_hash,
-	full_retained, command_fp, delivered_size`
+	full_retained, command_fp, delivered_size, handler`
 
 // EffectiveSizeExpr is a row's effective stored size — the bytes it actually
 // occupies. A summary-only row (full_retained = 0, written under
@@ -40,12 +40,12 @@ func scanOutput(s interface {
 }) (StoredOutput, error) {
 	var o StoredOutput
 	var lastAccessed, deliveredSize sql.NullInt64
-	var inputHash, outputHash, commandFP sql.NullString
+	var inputHash, outputHash, commandFP, handler sql.NullString
 	err := s.Scan(
 		&o.ID, &o.ProjectKey, &o.SessionID, &o.ToolName, &o.Summary, &o.FullContent,
 		&o.OriginalSize, &o.SummarySize, &o.CreatedAt, &o.Pinned, &o.AccessCount,
 		&lastAccessed, &inputHash, &outputHash, &o.FullRetained, &commandFP,
-		&deliveredSize,
+		&deliveredSize, &handler,
 	)
 	if err != nil {
 		return o, err
@@ -69,6 +69,10 @@ func scanOutput(s interface {
 	if deliveredSize.Valid {
 		v := deliveredSize.Int64
 		o.DeliveredSize = &v
+	}
+	if handler.Valid {
+		v := handler.String
+		o.Handler = &v
 	}
 	return o, nil
 }
@@ -156,12 +160,12 @@ func StoreOutput(database *sql.DB, in StoreInput) (StoredOutput, error) {
 		INSERT INTO stored_outputs
 			(id, project_key, session_id, tool_name, summary, full_content,
 			 original_size, summary_size, created_at, input_hash, output_hash, full_retained, command_fp,
-			 delivered_size)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			 delivered_size, handler)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		id, in.ProjectKey, in.SessionID, in.ToolName,
 		in.Summary, bodyToStore, in.OriginalSize,
 		summarySize, createdAt, nullString(in.InputHash), nullString(outputHash), fullRetained,
-		nullString(in.CommandFP), nullInt(in.DeliveredSize),
+		nullString(in.CommandFP), nullInt(in.DeliveredSize), nullString(in.Handler),
 	)
 	if err != nil {
 		tx.Rollback()
@@ -183,6 +187,7 @@ func StoreOutput(database *sql.DB, in StoreInput) (StoredOutput, error) {
 		OriginalSize: in.OriginalSize, SummarySize: summarySize, CreatedAt: createdAt,
 		Pinned: 0, AccessCount: 0, LastAccessed: nil, InputHash: in.InputHash, OutputHash: outputHash,
 		FullRetained: fullRetained, CommandFP: in.CommandFP, DeliveredSize: in.DeliveredSize,
+		Handler: in.Handler,
 	}, nil
 }
 

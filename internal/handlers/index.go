@@ -11,7 +11,8 @@ import (
 )
 
 // HandlerName returns the short function name of a handler (e.g. "githubHandler"),
-// for debug logging.
+// as upstream's handler.name gives it. A profile handler is a closure, so its
+// name comes from GetNamedHandler instead.
 func HandlerName(h Handler) string {
 	name := runtime.FuncForPC(reflect.ValueOf(h).Pointer()).Name()
 	if i := strings.LastIndex(name, "."); i >= 0 {
@@ -21,13 +22,14 @@ func HandlerName(h Handler) string {
 }
 
 // ProfileLookup is an optional hook, set by the profiles package (phase 2), that
-// returns a declarative-profile handler for a tool at the given tiers, or nil.
-// Kept as a variable to avoid an import cycle between handlers and profiles.
-var ProfileLookup func(toolName string, tiers []string) Handler
+// returns a declarative-profile handler for a tool at the given tiers and its
+// name (`profile:<id>`), or nil. Kept as a variable to avoid an import cycle
+// between handlers and profiles.
+var ProfileLookup func(toolName string, tiers []string) (Handler, string)
 
-func profileHandler(toolName string, tiers []string) Handler {
+func profileHandler(toolName string, tiers []string) (Handler, string) {
 	if ProfileLookup == nil {
-		return nil
+		return nil, ""
 	}
 	return ProfileLookup(toolName, tiers)
 }
@@ -88,35 +90,44 @@ var handlerRegistry = []handlerMatcher{
 //  7. CSV content fallback
 //  8. generic handler
 func GetHandler(toolName string, output any, input any) Handler {
+	h, _ := GetNamedHandler(toolName, output, input)
+	return h
+}
+
+// GetNamedHandler is GetHandler plus the handler's name, which the hook
+// records for `discover` (upstream #341): the function name, or
+// `profile:<id>` for a profile.
+func GetNamedHandler(toolName string, output any, input any) (Handler, string) {
+	named := func(h Handler) (Handler, string) { return h, HandlerName(h) }
 	if toolName == "Bash" {
-		return keepStderrError(GetBashHandler(input), output)
+		return named(keepStderrError(GetBashHandler(input), output))
 	}
-	if h := profileHandler(toolName, []string{"user", "community"}); h != nil {
-		return h
+	if h, name := profileHandler(toolName, []string{"user", "community"}); h != nil {
+		return h, name
 	}
 	for _, m := range handlerRegistry {
 		if m.match(toolName) {
-			return m.handler
+			return named(m.handler)
 		}
 	}
-	if h := profileHandler(toolName, []string{"bundled"}); h != nil {
-		return h
+	if h, name := profileHandler(toolName, []string{"bundled"}); h != nil {
+		return h, name
 	}
 
 	// MCP content blocks that include images/audio: strip them before the JSON
 	// fallback, which does not truncate strings and would store the JPEG
 	// almost verbatim (upstream #270).
 	if hasNonTextContentBlocks(output) {
-		return contentBlockHandler
+		return named(contentBlockHandler)
 	}
 
 	text := ExtractText(output)
 	trimmed := strings.TrimLeftFunc(text, unicode.IsSpace)
 	if strings.HasPrefix(trimmed, "{") || strings.HasPrefix(trimmed, "[") {
-		return jsonHandler
+		return named(jsonHandler)
 	}
 	if looksLikeCsv(text) {
-		return csvHandler
+		return named(csvHandler)
 	}
-	return genericHandler
+	return named(genericHandler)
 }

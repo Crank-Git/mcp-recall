@@ -15,6 +15,7 @@ import (
 
 	"mcprecall/internal/config"
 	"mcprecall/internal/db"
+	"mcprecall/internal/discover"
 	"mcprecall/internal/format"
 	"mcprecall/internal/gc"
 	"mcprecall/internal/hooks"
@@ -75,6 +76,8 @@ func main() {
 		printStatus(r)
 	case "gc":
 		runGC(os.Args[2:])
+	case "discover":
+		runDiscover(os.Args[2:])
 	case "profiles":
 		profiles.HandleProfilesCommand(os.Args[2:])
 	case "learn":
@@ -122,6 +125,11 @@ Commands:
     --stale-days N     Legacy DBs (no recorded path) older than N days are
                        candidates (default 90)
     --vacuum           Full-VACUUM surviving DBs to reclaim free pages
+  discover             Rank output routed to fallback handlers: where a new
+                       handler would pay
+    --all              Every project's store, not just this one
+    --since YYYY-MM-DD Only output stored on or after this date
+    --limit N          Rows to list (default 10)
   profiles <cmd>       Manage compression profiles (list/available/info/install/
                        update/remove/seed/feed/check/retrain/test)
   learn                Generate profile suggestions from your installed MCPs
@@ -233,6 +241,45 @@ func runGC(args []string) {
 	cwd, _ := os.Getwd()
 	currentFile := db.DefaultDBPath(projectkey.Key(cwd))
 	gc.Run(os.Stdout, db.DataDir(), currentFile, opts, time.Now())
+}
+
+// runDiscover parses the discover subcommand's flags and prints the report.
+func runDiscover(args []string) {
+	var opts discover.Options
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--all":
+			opts.All = true
+		case "--since":
+			value := ""
+			if i+1 < len(args) {
+				value = args[i+1]
+			}
+			since, ok := discover.ParseSince(value)
+			if !ok {
+				fmt.Fprintln(os.Stderr, "--since must be a date, YYYY-MM-DD")
+				os.Exit(1)
+			}
+			opts.Since = since
+			i++
+		case "--limit":
+			n := 0
+			if i+1 < len(args) {
+				n, _ = strconv.Atoi(args[i+1])
+			}
+			if n < 1 {
+				fmt.Fprintln(os.Stderr, "--limit must be a positive integer")
+				os.Exit(1)
+			}
+			opts.Limit = n
+			i++
+		default:
+			fmt.Fprintf(os.Stderr, "unknown discover option: %s\n", args[i])
+			os.Exit(1)
+		}
+	}
+	cwd, _ := os.Getwd()
+	discover.Run(os.Stdout, db.DataDir(), db.DefaultDBPath(projectkey.Key(cwd)), opts)
 }
 
 // writeJSON writes v as JSON followed by a newline, without HTML-escaping (to

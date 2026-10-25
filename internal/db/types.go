@@ -28,6 +28,9 @@ type StoredOutput struct {
 	// DeliveredSize is the bytes Claude received: header, newline, summary
 	// (upstream #319). nil for notes and pre-migration rows.
 	DeliveredSize *int64
+	// Handler names the handler that produced the summary (upstream #341). nil
+	// for notes and rows stored before handlers were recorded.
+	Handler *string
 }
 
 // StoreInput is the input required to persist a new compressed tool output.
@@ -53,6 +56,9 @@ type StoreInput struct {
 	// DeliveredSize is the bytes Claude received for this output (upstream
 	// #319); nil stores NULL.
 	DeliveredSize *int64
+	// Handler names the handler that produced the summary, for `discover`
+	// (upstream #341); nil stores NULL.
+	Handler *string
 }
 
 // SearchOptions configures full-text search across stored outputs.
@@ -113,6 +119,33 @@ type CommandBreakdownRow struct {
 	Items         int
 	OriginalBytes int
 	SummaryBytes  int
+}
+
+// HandlerBreakdownRow is a per-handler row from GetHandlerBreakdown (upstream
+// #341).
+type HandlerBreakdownRow struct {
+	Handler       string
+	Items         int
+	OriginalBytes int
+	SummaryBytes  int
+	// Retrieved counts rows fetched at least once with recall__retrieve.
+	Retrieved int
+}
+
+// FallbackRouteRow is a tool or Bash command family routed to a fallback
+// handler, from GetFallbackRoutes (upstream #341).
+type FallbackRouteRow struct {
+	ToolName string
+	// CommandFP is the Bash command family ("unknown" when untagged); nil for
+	// other tools.
+	CommandFP *string
+	HandlerBreakdownRow
+}
+
+// HandlerQueryOptions filters the handler analytics.
+type HandlerQueryOptions struct {
+	// Since, when non-zero, keeps rows created at or after this Unix time.
+	Since int64
 }
 
 // SuggestionsOptions configures GetSuggestions.

@@ -42,7 +42,7 @@ func TestShouldRetainFullBody(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := ShouldRetainFullBody(c.level, c.tool, c.command); got != c.want {
+			if got := ShouldRetainFullBody(c.level, c.tool, c.command, ""); got != c.want {
 				t.Errorf("ShouldRetainFullBody(%q, %q, %q) = %v, want %v", c.level, c.tool, c.command, got, c.want)
 			}
 		})
@@ -53,13 +53,13 @@ func TestShouldRetainFullBody(t *testing.T) {
 // newline-separated cd keeps its body (upstream #260).
 func TestNewlineCdPrefix(t *testing.T) {
 	for _, cmd := range []string{"curl https://example.com", "gh api /repos/x/y", "wget https://example.com/f.tar"} {
-		if !ShouldRetainFullBody("balanced", "Bash", "cd /repo\n"+cmd) {
+		if !ShouldRetainFullBody("balanced", "Bash", "cd /repo\n"+cmd, "") {
 			t.Errorf("dropped body for newline-cd %q", cmd)
 		}
 	}
 	for _, cmd := range []string{"curl https://example.com", "git diff", "git log", "ls -la", "gh api /x"} {
-		nl := ShouldRetainFullBody("balanced", "Bash", "cd /repo\n"+cmd)
-		amp := ShouldRetainFullBody("balanced", "Bash", "cd /repo && "+cmd)
+		nl := ShouldRetainFullBody("balanced", "Bash", "cd /repo\n"+cmd, "")
+		amp := ShouldRetainFullBody("balanced", "Bash", "cd /repo && "+cmd, "")
 		if nl != amp {
 			t.Errorf("%q: newline=%v, &&=%v", cmd, nl, amp)
 		}
@@ -68,13 +68,13 @@ func TestNewlineCdPrefix(t *testing.T) {
 
 // Upstream #302: leading wrappers are unwrapped before classifying.
 func TestWrapperPrefix(t *testing.T) {
-	if !ShouldRetainFullBody("balanced", "Bash", "timeout 30 curl https://x") {
+	if !ShouldRetainFullBody("balanced", "Bash", "timeout 30 curl https://x", "") {
 		t.Error("timeout curl should keep its body")
 	}
-	if !ShouldRetainFullBody("balanced", "Bash", "env CI=1 gh api /x") {
+	if !ShouldRetainFullBody("balanced", "Bash", "env CI=1 gh api /x", "") {
 		t.Error("env gh api should keep its body")
 	}
-	if ShouldRetainFullBody("balanced", "Bash", "timeout 30 git log") {
+	if ShouldRetainFullBody("balanced", "Bash", "timeout 30 git log", "") {
 		t.Error("timeout git log should not keep its body")
 	}
 }
@@ -87,11 +87,11 @@ func TestContentReadsKeepBody(t *testing.T) {
 		"grep -n foo -A 30 src/x.ts | head -40", `echo "=== a"; cat a.md`,
 		"cd /repo && git --no-pager diff main", "timeout 30 cat big.log", "sudo cat /etc/hosts",
 	} {
-		if !ShouldRetainFullBody("balanced", "Bash", c) {
+		if !ShouldRetainFullBody("balanced", "Bash", c, "") {
 			t.Errorf("balanced dropped the body of content read %q", c)
 		}
 	}
-	if ShouldRetainFullBody("minimal", "Bash", "cat README.md") {
+	if ShouldRetainFullBody("minimal", "Bash", "cat README.md", "") {
 		t.Error("minimal should drop every body")
 	}
 }
